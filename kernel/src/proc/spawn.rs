@@ -4372,8 +4372,9 @@ pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
 }
 
 /// Ring-3 proof that a process holding `File` `READ` alone can neither
-/// truncate nor create through an open's flags
-/// ([`crate::syscall::handlers`]'s `require_open_rights`), and that a
+/// truncate nor create through an open's flags, while one holding `READ` and
+/// `WRITE` can both ([`crate::syscall::handlers`]'s `require_open_rights`),
+/// and that a
 /// `FileTree` capability (design-decisions 1595) opens, to read only, files
 /// beneath its directory and no others: not one beside it, not one reached
 /// by `..` or a symbolic link out of it, and nothing for a tree naming
@@ -4398,6 +4399,8 @@ pub fn self_test_open_rights() -> KernelResult<()> {
     const CONTENT: &[u8] = b"slateos open rights";
     /// A name nothing makes: a create refused must leave it unmade.
     const NEW: &str = "/slateos-open-rights/new.txt";
+    /// A name the create allowed makes.
+    const MADE: &str = "/slateos-open-rights/made.txt";
     /// Outside the tree, beside it: `/slateos-open-rights2` is not beneath
     /// `/slateos-open-rights`.
     const BESIDE: &str = "/slateos-open-rights2.txt";
@@ -4424,8 +4427,10 @@ pub fn self_test_open_rights() -> KernelResult<()> {
         return Ok(());
     }
     // Ignored on purpose: a leftover link from an earlier boot is made
-    // again below, and none is no matter.
+    // again below, and none is no matter; a leftover of the name a refused
+    // create must not make would read as its making.
     let _ = Vfs::remove(LINK);
+    let _ = Vfs::remove(NEW);
     // A filesystem without symbolic links leaves that one case out, said
     // below.
     let linked = Vfs::symlink(LINK, BESIDE).is_ok();
@@ -4434,11 +4439,7 @@ pub fn self_test_open_rights() -> KernelResult<()> {
         crate::fs::trees::register(crate::fs::path::Path::new("/slateos-open-rights-other"))?;
 
     let read_only = [(ResourceType::File, 0u64, Rights::READ)];
-    let read_write = [(
-        ResourceType::File,
-        0u64,
-        Rights::READ | Rights::WRITE | Rights::CREATE,
-    )];
+    let read_write = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let tree_only = [(ResourceType::FileTree, tree, Rights::READ)];
     let other_tree = [(ResourceType::FileTree, other, Rights::READ)];
     let read = F::READ.bits();
@@ -4466,6 +4467,7 @@ pub fn self_test_open_rights() -> KernelResult<()> {
         ),
         ("READ alone does not create", &read_only, NEW, create, 1),
         ("READ and WRITE truncate", &read_write, BESIDE, truncate, 0),
+        ("READ and WRITE create", &read_write, MADE, create, 0),
         ("a tree opens to read beneath it", &tree_only, FILE, read, 0),
         (
             "a tree does not truncate beneath it",
@@ -4576,6 +4578,7 @@ pub fn self_test_open_rights() -> KernelResult<()> {
     // failure here says nothing about the rights tested.
     let _ = Vfs::remove(LINK);
     let _ = Vfs::remove(NEW);
+    let _ = Vfs::remove(MADE);
     let _ = Vfs::remove(FILE);
     let _ = Vfs::rmdir(DIR);
     let _ = Vfs::remove(BESIDE);

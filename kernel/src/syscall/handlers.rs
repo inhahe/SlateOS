@@ -13868,11 +13868,13 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// The File capability rights an open asking `flags` needs: `READ` always;
-/// `WRITE` as well to write, truncate or append; `CREATE` as well to create
-/// -- what `SYS_FS_WRITE` and `sys_fs_create` ask for the same acts, which
-/// an open's flags do inside the open (known-issues
-/// A-OPEN-WITH-ONLY-READ-RIGHTS-CAN-TRUNCATE-AND-CREATE). Every open path
-/// asks this.
+/// `WRITE` as well to write, truncate, append or create -- what
+/// `SYS_FS_WRITE` asks for the bytes, which an open's flags change inside
+/// the open (known-issues A-OPEN-WITH-ONLY-READ-RIGHTS-CAN-TRUNCATE-AND-CREATE).
+/// A create asks `WRITE`, as the Linux `O_TMPFILE` open's does; whether an
+/// open that creates should ask `CREATE` as `sys_fs_create` does is
+/// known-issues A-AN-OPEN-THAT-CREATES-ASKS-WRITE-NOT-CREATE. Every open
+/// path asks this.
 ///
 /// # Errors
 ///
@@ -13881,14 +13883,11 @@ pub(crate) fn require_open_rights(flags: crate::fs::handle::OpenFlags) -> Result
     use crate::cap::{ResourceType, Rights};
     use crate::fs::handle::OpenFlags as F;
     require_cap_type(ResourceType::File, Rights::READ)?;
-    if [F::WRITE, F::TRUNCATE, F::APPEND]
+    if [F::WRITE, F::TRUNCATE, F::APPEND, F::CREATE]
         .iter()
         .any(|&f| flags.contains(f))
     {
         require_cap_type(ResourceType::File, Rights::WRITE)?;
-    }
-    if flags.contains(F::CREATE) {
-        require_cap_type(ResourceType::File, Rights::CREATE)?;
     }
     Ok(())
 }

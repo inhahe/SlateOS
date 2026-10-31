@@ -39,8 +39,12 @@ reads), and give it what it uses.
 
 **Fixed (lane A, 2026-10-30).** `require_open_rights` in
 `kernel/src/syscall/handlers.rs`: `READ` always, `WRITE` too for `WRITE`,
-`TRUNCATE` or `APPEND`, `CREATE` too for `CREATE` -- asked by every open
-path above (`sys_fs_open`, `sys_fs_open_mode`, `sys_fs_openat2`, the kernel-
-path helpers the Linux `open` reaches, and the Linux `openat`). Checked by
-`proc::spawn::self_test_open_rights`, from ring 3: a process holding `READ`
-alone neither truncates nor creates, and the file is whole after.
+`TRUNCATE`, `APPEND` or `CREATE` -- asked by every open path above
+(`sys_fs_open`, `sys_fs_open_mode`, `sys_fs_openat2`, the kernel-path
+helpers the Linux `open` reaches, and the Linux `openat`). A create asks
+`WRITE`, not `CREATE`: the boot test's ring-3 programs, granted
+`READ | WRITE`, create files as they open them (whether it should ask
+`CREATE` is known-issues A-AN-OPEN-THAT-CREATES-ASKS-WRITE-NOT-CREATE).
+Checked by `proc::spawn::self_test_open_rights`, from ring 3: a process
+holding `READ` alone neither truncates nor creates, and the file is whole
+after; one holding `READ` and `WRITE` does both.

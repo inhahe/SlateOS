@@ -780,6 +780,34 @@ pub fn self_test() -> Result<(), &'static str> {
         );
     }
 
+    // The FADT's 64-bit register blocks against their legacy fields:
+    // (space, address, width, legacy, legacy length) to (port, length, out
+    // of reach).
+    type Fields = (u8, u64, u8, u16, u8);
+    type Block = (u16, u8, bool);
+    let blocks: [(Fields, Block); 6] = [
+        // Unset: the legacy field.
+        ((1, 0, 32, 0x400, 4), (0x400, 4, false)),
+        // In I/O space: its port, the legacy field's length.
+        ((1, 0x1800, 32, 0x400, 4), (0x1800, 4, false)),
+        // No legacy length: the width's.
+        ((1, 0x1800, 32, 0, 0), (0x1800, 4, false)),
+        // In memory, out of reach: the legacy field stands.
+        ((0, 0xFED8_0800, 32, 0x800, 4), (0x800, 4, true)),
+        // Past the I/O ports: so too.
+        ((1, 0x1_0000, 32, 0x800, 4), (0x800, 4, true)),
+        // Out of reach with no legacy field: none.
+        ((0, 0xFED8_0800, 32, 0, 0), (0, 0, true)),
+    ];
+    if blocks
+        .iter()
+        .any(|&((space, address, width, legacy, len), want)| {
+            fadt::block_port(space, address, width, legacy, len) != want
+        })
+    {
+        return Err("a FADT register block is not resolved against its legacy field as ACPI says");
+    }
+
     serial_println!("[acpi] Self-test PASSED");
     Ok(())
 }

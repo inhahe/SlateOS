@@ -16,10 +16,13 @@
 //! AML that could answer one, and a level-triggered SCI left asserted by
 //! one would never stop), every fixed event's status cleared, and of the
 //! fixed events that raise the SCI only the button's enabled. Unmasking the
-//! SCI is last; should it fail (its interrupt-remapping entry, say), every
-//! enable register `arm_events` rewrote is put back as the firmware had it
-//! and ACPI mode given back. The SCI's pin was given its sense by
-//! `ioapic::init`, from the MADT and [`sci_sense`].
+//! SCI is last, its pin checked before anything is taken; should it fail
+//! even so (its interrupt-remapping entry rewritten in between, say), ACPI
+//! mode taken is given back with every enable register `arm_events`
+//! rewrote put back as the firmware had it, and where ACPI mode stays the
+//! OS's every event is turned off, since nothing answers the SCI. The SCI's
+//! pin and sense are [`sci_line`]'s, which `ioapic::init` programmed it
+//! with.
 //!
 //! The SCI's handler also turns off any other event, fixed or
 //! general-purpose, it finds enabled and firing -- one the firmware enabled
@@ -103,8 +106,7 @@ static PRESSES: AtomicU64 = AtomicU64::new(0);
 static HARNESS: AtomicBool = AtomicBool::new(false);
 
 /// The FADT's power-management registers, kept for [`init`] and for
-/// `ioapic::init`'s SCI sense ([`sci_irq`]): `acpi::init`'s, once it has
-/// parsed the FADT.
+/// [`sci_line`]: `acpi::init`'s, once it has parsed the FADT.
 pub fn note_fadt(info: &PowerInfo) {
     *FADT.lock() = Some(*info);
 }
@@ -112,7 +114,7 @@ pub fn note_fadt(info: &PowerInfo) {
 /// The SCI's ISA IRQ, as the FADT names it; `None` without a FADT or on a
 /// hardware-reduced platform, which has no SCI of this kind.
 #[must_use]
-pub fn sci_irq() -> Option<u16> {
+fn sci_irq() -> Option<u16> {
     FADT.lock()
         .as_ref()
         .filter(|f| !f.hw_reduced)
@@ -138,13 +140,50 @@ pub fn presses() -> u64 {
 /// "conforming" (0) is ACPI's own for the SCI, level-triggered and
 /// active-low, as ACPICA and Linux's `acpi_sci_ioapic_setup` read it, not
 /// the ISA bus's edge and active-high; a reserved value (2) is read so too.
-/// `ioapic::init`'s, as it programs the SCI's pin.
+/// [`sci_line`]'s.
 #[must_use]
-pub fn sci_sense(flags: Option<u16>) -> (bool, bool) {
+fn sci_sense(flags: Option<u16>) -> (bool, bool) {
     let flags = flags.unwrap_or(0);
     let level = (flags >> 2) & 0b11 != 0b01;
     let active_low = flags & 0b11 != 0b01;
     (level, active_low)
+}
+
+/// The SCI's line into the I/O APIC, as ACPI defines it ([`sci_line`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SciLine {
+    /// The ISA IRQ the FADT names for the SCI.
+    pub irq: u8,
+    /// The I/O APIC pin (GSI) it comes in on: the one a bus-0 MADT override
+    /// for the IRQ names, else the IRQ itself.
+    pub pin: u32,
+    /// Level-triggered, not edge ([`sci_sense`]).
+    pub level: bool,
+    /// Active-low, not active-high ([`sci_sense`]).
+    pub active_low: bool,
+    /// The override's flags, `None` where none names the IRQ.
+    pub flags: Option<u16>,
+}
+
+/// The SCI's line -- its pin and its sense -- for `ioapic::init`, which
+/// programs the pin so, and for [`init`], which unmasks it: one answer for
+/// both. `None` without a FADT, on a hardware-reduced platform, or for an
+/// SCI the FADT puts past the ISA IRQs.
+#[must_use]
+pub fn sci_line() -> Option<SciLine> {
+    let irq = u8::try_from(sci_irq()?).ok()?;
+    let ovr = crate::acpi::interrupt_overrides()
+        .into_iter()
+        .find(|o| o.bus == 0 && o.source_irq == irq);
+    let flags = ovr.as_ref().map(|o| o.flags);
+    let (level, active_low) = sci_sense(flags);
+    Some(SciLine {
+        irq,
+        pin: ovr.map_or(u32::from(irq), |o| o.gsi),
+        level,
+        active_low,
+        flags,
+    })
 }
 
 /// The power button made the OS's, as the module doc says. Said either
@@ -182,8 +221,25 @@ pub fn init() {
         serial_println!("[acpi] power button: {why}; {whose}");
         return;
     }
-    let Some(pin) = sci_route(f.sci_irq) else {
-        serial_println!("[acpi] power button: the SCI cannot be routed; {whose}");
+    let Some(line) = sci_line() else {
+        serial_println!(
+            "[acpi] power button: the SCI's IRQ {} is no ISA IRQ, so has no I/O APIC pin; {whose}",
+            f.sci_irq
+        );
+        return;
+    };
+    // Unmasking is the one step left to fail once ACPI mode is taken: the
+    // pin is checked first, past which it fails only for a remapping entry
+    // rewritten in between, and not written.
+    let Some(pin) = u8::try_from(line.pin)
+        .ok()
+        .filter(|&p| crate::ioapic::can_unmask(p))
+    else {
+        serial_println!(
+            "[acpi] power button: the SCI's I/O APIC pin {} (IRQ {}) cannot be unmasked -- past the I/O APIC's pins, or its remapping entry not written; {whose}",
+            line.pin,
+            line.irq
+        );
         return;
     };
     if !crate::workqueue::is_running() {
@@ -220,23 +276,36 @@ pub fn init() {
     // every status that could hold it asserted is cleared.
     if unsafe { crate::ioapic::unmask_irq(pin) } {
         serial_println!(
-            "[acpi] power button: handled -- the SCI (IRQ {}, I/O APIC pin {pin}) taken, the button's event alone enabled",
-            f.sci_irq
+            "[acpi] power button: handled -- the SCI (IRQ {}, I/O APIC pin {pin}, {}-triggered, active-{}) taken, the button's event alone enabled",
+            line.irq,
+            if line.level { "level" } else { "edge" },
+            if line.active_low { "low" } else { "high" }
         );
         return;
     }
     SCI_PIN.store(u32::MAX, Ordering::Release);
-    // SAFETY: the blocks they were read from, ACPI mode still the OS's.
-    unsafe { firmware_enables.restore(&f) };
-    let given_back = taken && set_acpi_mode(&f, false);
+    // ACPI mode taken goes back to the firmware with the events it had.
+    let given_back = taken && {
+        // SAFETY: the registers they were read from, ACPI mode still the
+        // OS's.
+        unsafe { firmware_enables.restore() };
+        set_acpi_mode(&f, false)
+    };
+    if !given_back {
+        // ACPI mode stays the OS's, and nothing answers the SCI: every event
+        // off, so that no status holds asserted a line another device's
+        // driver may share and unmask.
+        // SAFETY: the FADT's blocks, in ACPI mode.
+        unsafe { disarm_events(&f) };
+    }
     serial_println!(
         "[acpi] power button: the SCI's pin {pin} could not be unmasked; {}",
         if given_back {
             "ACPI mode given back, the firmware has the button again"
         } else if taken {
-            "ACPI mode could not be given back: no one has the button"
+            "ACPI mode could not be given back: no one has the button, every event off"
         } else {
-            "no one has the button"
+            "no one has the button, every event off"
         }
     );
 }
@@ -300,6 +369,29 @@ fn set_acpi_mode(f: &PowerInfo, on: bool) -> bool {
 ///
 /// `f`'s blocks are the FADT's, and ACPI mode is the OS's.
 unsafe fn arm_events(f: &PowerInfo) {
+    // SAFETY: the caller's.
+    unsafe { set_events(f, PWRBTN) };
+}
+
+/// Every event disarmed, in ACPI mode, for an SCI nothing answers: as
+/// [`arm_events`], with the button's event off too.
+///
+/// # Safety
+///
+/// As [`arm_events`].
+unsafe fn disarm_events(f: &PowerInfo) {
+    // SAFETY: the caller's.
+    unsafe { set_events(f, 0) };
+}
+
+/// Every GPE disabled and its status cleared, every fixed event's status
+/// cleared, and of the fixed events that raise the SCI those in `fixed`
+/// alone enabled, PM1 enable's other bits kept.
+///
+/// # Safety
+///
+/// As [`arm_events`].
+unsafe fn set_events(f: &PowerInfo, fixed: u16) {
     for (status, enable) in gpe_ports(f) {
         // SAFETY: an enable byte and a status byte of a GPE block (the
         // caller's contract): disabled, and cleared by writing 1s.
@@ -311,23 +403,22 @@ unsafe fn arm_events(f: &PowerInfo) {
     for evt in pm1_blocks(f) {
         let enables = enable_port(evt, f.pm1_evt_len);
         // SAFETY: a PM1 event block's status register, cleared by writing
-        // 1s, and its enable register, the OS's in ACPI mode: of the bits
-        // that raise the SCI, the button's alone set.
+        // 1s, and its enable register, the OS's in ACPI mode.
         unsafe {
             crate::port::outw(evt, PM1_ALL_STATUS);
             let kept = crate::port::inw(enables) & !PM1_SCI_ENABLES;
-            crate::port::outw(enables, kept | PWRBTN);
+            crate::port::outw(enables, kept | (fixed & PM1_SCI_ENABLES));
         }
     }
 }
 
 /// The enable registers [`arm_events`] rewrites, as the firmware handed them
-/// over -- read before ACPI mode is taken: each PM1 event block's
-/// ([`pm1_blocks`]' order), then each GPE enable byte ([`gpe_ports`]').
-/// What [`init`] puts back when it cannot take the SCI after all.
+/// over -- read before ACPI mode is taken -- each as its port and its value:
+/// each PM1 event block's enable register, then each GPE enable byte. What
+/// [`init`] puts back when it cannot take the SCI after all.
 struct FirmwareEnables {
-    pm1: alloc::vec::Vec<u16>,
-    gpe: alloc::vec::Vec<u8>,
+    pm1: alloc::vec::Vec<(u16, u16)>,
+    gpe: alloc::vec::Vec<(u16, u8)>,
 }
 
 impl FirmwareEnables {
@@ -339,14 +430,17 @@ impl FirmwareEnables {
     unsafe fn read(f: &PowerInfo) -> Self {
         Self {
             pm1: pm1_blocks(f)
-                // SAFETY: a PM1 event block's enable register (the
-                // caller's contract); reading it changes nothing.
-                .map(|evt| unsafe { crate::port::inw(enable_port(evt, f.pm1_evt_len)) })
+                .map(|evt| {
+                    let port = enable_port(evt, f.pm1_evt_len);
+                    // SAFETY: a PM1 event block's enable register (the
+                    // caller's contract); reading it changes nothing.
+                    (port, unsafe { crate::port::inw(port) })
+                })
                 .collect(),
             gpe: gpe_ports(f)
                 // SAFETY: a GPE block's enable byte (the caller's
                 // contract); reading it changes nothing.
-                .map(|(_, enable)| unsafe { crate::port::inb(enable) })
+                .map(|(_, port)| (port, unsafe { crate::port::inb(port) }))
                 .collect(),
         }
     }
@@ -355,16 +449,16 @@ impl FirmwareEnables {
     ///
     /// # Safety
     ///
-    /// `f` is the one they were read from, and ACPI mode is the OS's.
-    unsafe fn restore(&self, f: &PowerInfo) {
-        for (evt, &value) in pm1_blocks(f).zip(&self.pm1) {
-            // SAFETY: the PM1 event block's enable register it was read
-            // from (the caller's contract), the OS's in ACPI mode.
-            unsafe { crate::port::outw(enable_port(evt, f.pm1_evt_len), value) };
+    /// ACPI mode is the OS's.
+    unsafe fn restore(&self) {
+        for &(port, value) in &self.pm1 {
+            // SAFETY: a PM1 event block's enable register, as `read` found
+            // it, the OS's in ACPI mode (the caller's contract).
+            unsafe { crate::port::outw(port, value) };
         }
-        for ((_, enable), &value) in gpe_ports(f).zip(&self.gpe) {
+        for &(port, value) in &self.gpe {
             // SAFETY: as above, a GPE block's enable byte.
-            unsafe { crate::port::outb(enable, value) };
+            unsafe { crate::port::outb(port, value) };
         }
     }
 }
@@ -398,22 +492,6 @@ fn gpe_ports(f: &PowerInfo) -> impl Iterator<Item = (u16, u16)> {
         })
 }
 
-/// The I/O APIC pin the SCI -- ISA IRQ `irq` -- comes in on: the one a
-/// MADT override names for it, else the IRQ itself. `None` for an IRQ or a
-/// pin the I/O APIC does not have ([`crate::ioapic::pins`]), so that
-/// unmasking it is the one step of [`init`] left to fail once ACPI mode is
-/// taken.
-fn sci_route(irq: u16) -> Option<u8> {
-    let source = u8::try_from(irq).ok()?;
-    let pin = crate::acpi::interrupt_overrides()
-        .into_iter()
-        .find(|o| o.bus == 0 && o.source_irq == source)
-        .map_or(u32::from(source), |o| o.gsi);
-    u8::try_from(pin)
-        .ok()
-        .filter(|&p| usize::from(p) < crate::ioapic::pins())
-}
-
 /// The SCI, from `ioapic::handle_device_irq`, in interrupt context: the
 /// power button's status, where set and enabled, cleared -- before the
 /// EOI, or the level-triggered line would raise it again -- and the press
@@ -428,18 +506,18 @@ pub fn handle_sci() {
     let Some(f) = ARMED.get() else {
         return;
     };
-    for (status_port, enable_port) in gpe_ports(f) {
+    for (status_byte, enable_byte) in gpe_ports(f) {
         // SAFETY: a status byte and its enable byte of a GPE block `init`
         // armed; reading them changes nothing.
         let (status, enabled) =
-            unsafe { (crate::port::inb(status_port), crate::port::inb(enable_port)) };
+            unsafe { (crate::port::inb(status_byte), crate::port::inb(enable_byte)) };
         let firing = status & enabled;
         if firing != 0 {
             // SAFETY: as above: the firing events disabled, then their
             // status cleared by writing 1s.
             unsafe {
-                crate::port::outb(enable_port, enabled & !firing);
-                crate::port::outb(status_port, firing);
+                crate::port::outb(enable_byte, enabled & !firing);
+                crate::port::outb(status_byte, firing);
             }
         }
     }
@@ -538,25 +616,23 @@ fn pressed(_arg: u64) {
     }
 }
 
-/// The power button under the boot test's harness (`acpi.pwrbtn=hmp`): the
-/// SCI's sense worked out right from every form a MADT override takes; in
-/// QEMU, ACPI mode given back to the firmware and taken again
-/// (`ACPI_DISABLE`, then `ACPI_ENABLE`, the handoff a PC in legacy mode
-/// needs) and the events armed again, as `init` arms them after taking it;
-/// the PM timer's fixed event, enabled behind the kernel's back, turned off
-/// by [`handle_sci`] when it fires;
-/// and the harness's press -- asked for on the serial line, made by QEMU's
-/// `system_powerdown` -- reaching [`pressed`] within [`PRESS_WAIT_MS`].
-/// Skipped beyond the sense, and said, without a harness.
+/// Says a failure of the power button's self-test, and makes its error.
+fn fail(what: &str) -> KernelError {
+    serial_println!("[acpi]   FAIL: power button: {what}");
+    KernelError::InternalError
+}
+
+/// The decisions [`init`] makes from the FADT and the MADT alone, checked
+/// against fabricated tables: the SCI's sense from every form an override's
+/// flags take, which FADTs leave the button to the firmware, and which
+/// offer a mode switch. Each failure is said and kept, and the rest still
+/// run: one does not hide another.
 ///
 /// # Errors
 ///
-/// `InternalError`, said, for anything not so.
-pub fn self_test() -> KernelResult<()> {
-    let fail = |what: &str| {
-        serial_println!("[acpi]   FAIL: power button: {what}");
-        KernelError::InternalError
-    };
+/// `InternalError`, said, for any not as the module doc says.
+fn pure_checks() -> KernelResult<()> {
+    let mut result = Ok(());
     // (flags, level, active-low): conforming fields are ACPI's SCI default.
     let senses: [(Option<u16>, bool, bool); 6] = [
         (None, true, true),
@@ -566,27 +642,153 @@ pub fn self_test() -> KernelResult<()> {
         (Some(0x1), true, false),
         (Some(0x7), false, true),
     ];
-    // A pure check's failure is said and kept, and the rest still run: one
-    // failure does not hide another.
-    let mut pure = Ok(());
     if senses
         .iter()
         .any(|&(flags, level, low)| sci_sense(flags) != (level, low))
     {
-        pure = Err(fail(
+        result = Err(fail(
             "the SCI's sense is not read from an override's flags as ACPI says",
         ));
     }
+    // A FADT as QEMU's q35 gives it.
+    let base = PowerInfo {
+        pm1a_cnt_blk: 0x604,
+        pm1b_cnt_blk: 0,
+        slp_typ_s5: 0,
+        has_reset_reg: false,
+        reset_addr_space: 0,
+        reset_address: 0,
+        reset_value: 0,
+        dsdt_phys: 0,
+        sci_irq: 9,
+        pm1a_evt_blk: 0x600,
+        pm1b_evt_blk: 0,
+        pm1_evt_len: 4,
+        gpe0_blk: 0x620,
+        gpe0_blk_len: 16,
+        gpe1_blk: 0,
+        gpe1_blk_len: 0,
+        smi_command: 0xB2,
+        acpi_enable: 2,
+        acpi_disable: 3,
+        hw_reduced: false,
+        fixed_power_button: true,
+    };
+    let method_button = PowerInfo {
+        fixed_power_button: false,
+        ..base
+    };
+    // (FADT, ACPI mode the OS's at handoff, the button the kernel's).
+    let handled: [(PowerInfo, bool, bool); 7] = [
+        (base, false, true),
+        (base, true, true),
+        (
+            PowerInfo {
+                hw_reduced: true,
+                ..base
+            },
+            true,
+            false,
+        ),
+        (
+            PowerInfo {
+                pm1a_evt_blk: 0,
+                ..base
+            },
+            true,
+            false,
+        ),
+        (
+            PowerInfo {
+                pm1_evt_len: 2,
+                ..base
+            },
+            true,
+            false,
+        ),
+        // A control-method button: the firmware's while it keeps legacy
+        // mode, the kernel's once ACPI mode is the OS's.
+        (method_button, false, false),
+        (method_button, true, true),
+    ];
+    if handled
+        .iter()
+        .any(|&(f, os_has_it, want)| not_handled(&f, os_has_it).is_none() != want)
+    {
+        result = Err(fail(
+            "which FADTs leave the button to the firmware is not as the module doc says",
+        ));
+    }
+    // (SMI_CMD, ACPI_ENABLE, ACPI_DISABLE, a switch offered): no port, or
+    // both values 0, is none, as ACPICA reads them; one value 0 is a value.
+    let switches: [(u16, u8, u8, bool); 5] = [
+        (0xB2, 2, 3, true),
+        (0, 2, 3, false),
+        (0xB2, 0, 0, false),
+        (0xB2, 0xA0, 0, true),
+        (0xB2, 0, 0xA1, true),
+    ];
+    if switches
+        .iter()
+        .any(|&(smi_command, acpi_enable, acpi_disable, want)| {
+            let f = PowerInfo {
+                smi_command,
+                acpi_enable,
+                acpi_disable,
+                ..base
+            };
+            can_switch(&f) != want
+        })
+    {
+        result = Err(fail(
+            "whether the FADT offers a mode switch is not read as ACPICA reads it",
+        ));
+    }
+    result
+}
+
+/// The power button: [`pure_checks`], and under the boot test's harness
+/// (`acpi.pwrbtn=hmp`), in QEMU, ACPI mode given back to the firmware and
+/// taken again (`ACPI_DISABLE`, then `ACPI_ENABLE`, the handoff a PC in
+/// legacy mode needs) and the events armed again, as `init` arms them after
+/// taking it; the PM timer's fixed event, enabled behind the kernel's back,
+/// turned off by [`handle_sci`] when it fires; the enable registers put back
+/// as read ([`FirmwareEnables`]); and the harness's press -- asked for on
+/// the serial line, made by QEMU's `system_powerdown` -- reaching
+/// [`pressed`] within [`PRESS_WAIT_MS`]. Without a harness only the pure
+/// checks run, and the rest is said to be skipped.
+///
+/// # Errors
+///
+/// `InternalError`, said, for anything not so.
+pub fn self_test() -> KernelResult<()> {
+    // A failure that leaves the rest meaningful is said and kept, and the
+    // rest still run.
+    let mut result = pure_checks();
     if !HARNESS.load(Ordering::Acquire) {
         serial_println!(
-            "[acpi] power button self-test: skipped beyond the SCI's sense, no harness to press it ({HARNESS_WORD}=hmp)"
+            "[acpi] power button self-test: only the pure checks run, no harness to press it ({HARNESS_WORD}=hmp)"
         );
-        return pure;
+        return result;
     }
-    let f = match (ARMED.get(), sci_pin()) {
-        (Some(f), Some(_)) => *f,
+    let (f, pin) = match (ARMED.get(), sci_pin().and_then(|p| u8::try_from(p).ok())) {
+        (Some(f), Some(pin)) => (*f, pin),
         _ => return Err(fail("not handled, so the harness's press cannot be")),
     };
+    // The SCI's pin has ACPI's sense for it, and a PCI function sharing its
+    // line takes none of that from it.
+    let sense = crate::ioapic::sense(pin);
+    if sense != sci_line().map(|l| (l.level, l.active_low)) {
+        result = Err(fail("the SCI's pin does not have the sense ACPI gives it"));
+    }
+    // SAFETY: the I/O APIC is initialized; on the SCI's pin the call is to
+    // change nothing, which is what is checked.
+    unsafe { crate::ioapic::set_level_triggered(pin) };
+    if crate::ioapic::sense(pin) != sense {
+        result = Err(fail(
+            "a PCI function's level-triggered setup of the SCI's line changed the SCI's sense",
+        ));
+    }
     if can_switch(&f) {
         if !set_acpi_mode(&f, false) {
             return Err(fail("ACPI mode could not be given back to the firmware"));
@@ -623,6 +825,25 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!(
         "[acpi] power button: a fixed event enabled behind the kernel's back was turned off when it fired: OK"
     );
+    // What `init` puts back on a failed unmask: the enable registers as read.
+    // SAFETY: the FADT's blocks.
+    let saved = unsafe { FirmwareEnables::read(&f) };
+    // SAFETY: PM1a's enable register and the first GPE enable byte, the
+    // OS's in ACPI mode: the button's event off and a GPE on, for `restore`
+    // to undo. (Should that GPE fire, `handle_sci` turns it off, which is
+    // what `restore` writes too.)
+    unsafe {
+        crate::port::outw(enables, crate::port::inw(enables) & !PWRBTN);
+        if let Some((_, enable)) = gpe_ports(&f).next() {
+            crate::port::outb(enable, crate::port::inb(enable) | 1);
+        }
+        saved.restore();
+    }
+    // SAFETY: as above.
+    let again = unsafe { FirmwareEnables::read(&f) };
+    if again.pm1 != saved.pm1 || again.gpe != saved.gpe {
+        return Err(fail("the enable registers put back are not those read"));
+    }
     let before = presses();
     serial_println!("[acpi] power button: press it");
     let until = crate::hrtimer::now_ns().saturating_add(PRESS_WAIT_MS * 1_000_000);
@@ -637,5 +858,5 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!(
         "[acpi] power button: the harness's press raised the SCI, which took it to the worker: OK"
     );
-    pure
+    result
 }

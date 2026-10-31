@@ -42,7 +42,7 @@
 //! - Based on Linux `arch/x86/kernel/apic/io_apic.c` register access
 //!   patterns.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::page_table;
@@ -148,6 +148,10 @@ static IOAPIC_BASE_VIRT: AtomicU64 = AtomicU64::new(0);
 
 /// Number of usable redirection entries (read from hardware at init).
 static NUM_REDIR_ENTRIES: AtomicU64 = AtomicU64::new(0);
+
+/// The pin the ACPI SCI comes in on, [`u32::MAX`] for none: programmed with
+/// the SCI's sense by [`init`], which [`set_level_triggered`] leaves as it is.
+static SCI_PIN: AtomicU32 = AtomicU32::new(u32::MAX);
 
 // ---------------------------------------------------------------------------
 // IRQ notification state (lock-free, safe from ISR context)
@@ -556,15 +560,10 @@ pub unsafe fn init() -> KernelResult<()> {
     // ISA IRQ 9 → level-triggered active-low).
     let overrides = crate::acpi::interrupt_overrides();
 
-    // The ACPI SCI's pin is programmed as ACPI defines the SCI: each field
-    // its override leaves conforming -- or both, with no override -- is
-    // level-triggered and active-low, not the ISA bus's edge and
-    // active-high (`acpi::events::sci_sense`, as Linux's
-    // `acpi_sci_ioapic_setup`).
-    let sci = crate::acpi::events::sci_irq().and_then(|irq| u8::try_from(irq).ok());
-    let sci_override =
-        sci.and_then(|irq| overrides.iter().find(|o| o.bus == 0 && o.source_irq == irq));
-    let sci_pin = sci.map(|irq| sci_override.map_or(u32::from(irq), |o| o.gsi));
+    // The ACPI SCI's pin is programmed as ACPI defines the SCI
+    // (`acpi::events::sci_line`), and kept so ([`set_level_triggered`]).
+    let sci = crate::acpi::events::sci_line();
+    SCI_PIN.store(sci.map_or(u32::MAX, |s| s.pin), Ordering::Release);
     for irq in 0..usable {
         #[allow(clippy::cast_possible_truncation)]
         let irq_u8 = irq as u8;
@@ -572,14 +571,25 @@ pub unsafe fn init() -> KernelResult<()> {
         // Destination LAPIC ID 0 in bits [63:56].
         let mut entry = vector | REDIR_MASKED;
 
-        if sci_pin.is_some_and(|pin| pin as usize == irq) {
-            let (level, active_low) = crate::acpi::events::sci_sense(sci_override.map(|o| o.flags));
-            if level {
+        if let Some(s) = sci.filter(|s| s.pin as usize == irq) {
+            if s.level {
                 entry |= REDIR_LEVEL_TRIGGER;
             }
-            if active_low {
+            if s.active_low {
                 entry |= REDIR_ACTIVE_LOW;
             }
+            serial_println!(
+                "[ioapic] pin {irq}: the ACPI SCI (IRQ {}), {}-triggered, active-{} ({})",
+                s.irq,
+                if s.level { "level" } else { "edge" },
+                if s.active_low { "low" } else { "high" },
+                s.flags.map_or_else(
+                    || alloc::string::String::from("no override: ACPI's own sense for the SCI"),
+                    |f| alloc::format!(
+                        "override flags {f:#x}, any field left conforming read as ACPI's for the SCI"
+                    )
+                )
+            );
         } else {
             // Check if this IOAPIC input has an ACPI interrupt source
             // override that changes the trigger mode or polarity.
@@ -677,11 +687,15 @@ pub unsafe fn unmask_irq(irq: u8) -> bool {
     true
 }
 
-/// How many pins -- redirection entries -- the I/O APIC has that the kernel
-/// programs: the pins [`unmask_irq`] and the rest accept. 0 before `init`.
+/// Whether [`unmask_irq`] would unmask pin `irq` now: one of the I/O APIC's
+/// pins the kernel programs, whose remapping entry -- with interrupts
+/// remapped -- was written. False before `init`.
 #[must_use]
-pub fn pins() -> usize {
-    usize::try_from(NUM_REDIR_ENTRIES.load(Ordering::Acquire)).unwrap_or(0)
+pub fn can_unmask(irq: u8) -> bool {
+    u64::from(irq) < NUM_REDIR_ENTRIES.load(Ordering::Acquire)
+        && !UNROUTED
+            .get(usize::from(irq))
+            .is_some_and(|u| u.load(Ordering::Acquire))
 }
 
 /// Mask (disable) an IOAPIC IRQ line.
@@ -720,7 +734,11 @@ pub unsafe fn mask_all() {
 }
 
 /// Configure a redirection entry for level-triggered, active-low
-/// delivery (typical for PCI interrupts).
+/// delivery (typical for PCI interrupts) -- except the ACPI SCI's pin,
+/// which a PCI function sharing its line must not take from it: [`init`]
+/// gave it the SCI's sense, level-triggered as a shared line needs, and a
+/// polarity the MADT may make active-high, which an active-low entry would
+/// read as asserted while the line is idle.
 ///
 /// The entry remains masked; call [`unmask_irq`] separately.
 ///
@@ -730,6 +748,10 @@ pub unsafe fn mask_all() {
 pub unsafe fn set_level_triggered(irq: u8) {
     let num = NUM_REDIR_ENTRIES.load(Ordering::Acquire);
     if u64::from(irq) >= num {
+        return;
+    }
+    if SCI_PIN.load(Ordering::Acquire) == u32::from(irq) {
+        serial_println!("[ioapic] pin {irq} is the ACPI SCI's: its sense is kept as ACPI gives it");
         return;
     }
 
@@ -787,16 +809,36 @@ pub unsafe fn set_irq_affinity(irq: u8, lapic_id: u8) {
 #[must_use]
 #[allow(dead_code)] // API for drivers zone; paired with set_irq_affinity.
 pub fn get_irq_affinity(irq: u8) -> Option<u8> {
+    redirection_entry(irq).map(|entry| {
+        // Destination LAPIC ID is in bits 63:56.
+        #[allow(clippy::cast_possible_truncation)]
+        let id = (entry >> 56) as u8;
+        id
+    })
+}
+
+/// Pin `irq`'s sense as its redirection entry has it -- `(level,
+/// active_low)` -- or `None` for a pin past the I/O APIC's.
+#[must_use]
+pub fn sense(irq: u8) -> Option<(bool, bool)> {
+    redirection_entry(irq).map(|entry| {
+        (
+            entry & REDIR_LEVEL_TRIGGER != 0,
+            entry & REDIR_ACTIVE_LOW != 0,
+        )
+    })
+}
+
+/// Pin `irq`'s redirection entry, in compatibility format, or `None` for a
+/// pin past the I/O APIC's.
+fn redirection_entry(irq: u8) -> Option<u64> {
     let num = NUM_REDIR_ENTRIES.load(Ordering::Acquire);
     if u64::from(irq) >= num {
         return None;
     }
 
     // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
-    let entry = with_window(|| unsafe { read_redir_entry(irq) });
-    // Destination LAPIC ID is in bits 63:56.
-    #[allow(clippy::cast_possible_truncation)]
-    Some((entry >> 56) as u8)
+    Some(with_window(|| unsafe { read_redir_entry(irq) }))
 }
 
 // ---------------------------------------------------------------------------

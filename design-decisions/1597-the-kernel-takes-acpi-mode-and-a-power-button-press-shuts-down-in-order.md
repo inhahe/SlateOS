@@ -15,26 +15,32 @@ what the default should be is open-questions A-Q32.
 **What was done** (`kernel/src/acpi/events.rs`; known-issues
 A-THE-POWER-BUTTON-NEVER-REACHES-THE-KERNEL):
 
-1. **ACPI mode is the kernel's**, on any platform that is not
-   hardware-reduced. At boot the kernel logs whether the firmware handed
-   the chipset over in ACPI mode (PM1 control's `SCI_EN`, or no SMI command
-   port at all). Everything that can be checked is checked first: the SCI's
-   pin (one the I/O APIC really has), whose sense `ioapic::init` set, and
-   the work queue. Only then, if the firmware kept legacy mode, does the
-   kernel write the FADT's `ACPI_ENABLE` to its SMI command port and wait
-   up to 3 s for `SCI_EN`, as ACPICA does; a FADT whose `ACPI_ENABLE` and
+1. **The kernel takes the power button**, and ACPI mode with it where the
+   firmware kept legacy mode, unless the platform is hardware-reduced, the
+   FADT names no PM1 blocks, the button is a control-method device in
+   legacy mode (below), or the SCI cannot be routed. At boot the kernel
+   logs whether the firmware handed the chipset over in ACPI mode (PM1
+   control's `SCI_EN`, or no SMI command port at all). Everything that can
+   be checked is checked first: the SCI's pin (one the I/O APIC has, whose
+   remapping entry was written), whose sense `ioapic::init` set, and the
+   work queue. Only then, if the firmware kept legacy mode, does the kernel
+   write the FADT's `ACPI_ENABLE` to its SMI command port and wait up to
+   3 s for `SCI_EN`, as ACPICA does; a FADT whose `ACPI_ENABLE` and
    `ACPI_DISABLE` are both 0 offers no switch, and nothing is written.
-   Should the SCI then fail to unmask, every enable register the kernel
-   rewrote is put back as the firmware had it, ACPI mode is given back
-   (`ACPI_DISABLE`), and the firmware has the button again. In legacy mode
-   the firmware acts on the button itself, which on the test PC means an
-   immediate power cut. A button the FADT makes a control-method device
-   (flag `PWR_BUTTON`), which needs AML, is left to the firmware where the
-   firmware kept legacy mode; where ACPI mode is the OS's already the
-   firmware will not act on it, so its fixed event is armed all the same.
-   The PM1 and GPE blocks are read from the FADT's 64-bit fields where
-   those are set, else from the legacy ones; a 64-bit block set outside I/O
-   space is out of reach, and treated as absent.
+   Should the SCI fail to unmask even so, ACPI mode taken is given back
+   (`ACPI_DISABLE`) with every enable register the kernel rewrote put back
+   as the firmware had it, so the firmware has the button again; where
+   ACPI mode stays the OS's, every event is turned off instead, since
+   nothing answers the SCI. In legacy mode the firmware acts on the button
+   itself, which on the test PC means an immediate power cut. A button the
+   FADT makes a control-method device (flag `PWR_BUTTON`), which needs AML,
+   is left to the firmware where the firmware kept legacy mode; where ACPI
+   mode is the OS's already the firmware will not act on it, so its fixed
+   event is armed all the same. The PM1 and GPE blocks are read from the
+   FADT's 64-bit fields where those are set in I/O space, else from the
+   legacy ones -- which ACPI says to ignore only for a 64-bit value the OS
+   can use, so they stand for one in memory (known-issues
+   A-FADT-BLOCKS-OUTSIDE-IO-SPACE-ARE-NOT-REACHED).
 2. **Only the power button's event is enabled.** Every general-purpose
    event (GPE) is disabled and its status cleared, and so is every fixed
    event's status. SlateOS runs no AML, so it could answer no GPE, and a
@@ -43,7 +49,8 @@ A-THE-POWER-BUTTON-NEVER-REACHES-THE-KERNEL):
    written; `PCIEXP_WAKE_DIS` and the reserved bits stay as they were.
 3. **The SCI** (ISA IRQ from the FADT, through any MADT override; each
    field the override leaves conforming is ACPI's SCI default,
-   level-triggered and active-low) is routed to a handler that clears the
+   level-triggered and active-low; a PCI function sharing its line does
+   not change that) is routed to a handler that clears the
    button's status before the EOI and hands the press to the kernel work
    queue. It also turns off any other event, fixed or general-purpose, it
    finds enabled and firing, one the firmware enabled again, whose level

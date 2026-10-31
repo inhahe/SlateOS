@@ -166,8 +166,8 @@ const FADT_X_GPE1_OFFSET: usize = 232;
 #[derive(Debug, Clone, Copy)]
 pub struct PowerInfo {
     /// PM1a Control Block port address: the 64-bit `X_PM1a_CNT_BLK`'s
-    /// where that is set -- 0, out of reach, where it is set outside I/O
-    /// space -- else the legacy field's. So for every block below.
+    /// where that is set in I/O space, else the legacy field's
+    /// ([`block_port`]). So for every block below.
     pub pm1a_cnt_blk: u16,
     /// PM1b Control Block port address (0 if not present), as
     /// `pm1a_cnt_blk`.
@@ -223,6 +223,40 @@ pub struct PowerInfo {
 // ---------------------------------------------------------------------------
 // FADT parsing
 // ---------------------------------------------------------------------------
+
+/// Where a register block the FADT names is, as `(port, length, out of
+/// reach)`. Its ACPI 2.0 64-bit field -- a Generic Address Structure's
+/// `space`, `address` and `width` (in bits) -- supersedes the legacy field
+/// (`legacy`, `legacy_len`) where it is set and usable: an I/O-space port,
+/// with the legacy field's length unless that is 0, when the width gives it.
+/// One set but out of reach -- in memory, say, or past the I/O ports -- is
+/// not usable by an OS that knows these blocks only as ports, and ACPI 6.5
+/// 5.2.9 has the legacy field ignored only for an X_ value "which can be
+/// used by the OSPM": the legacy field stands, and the third value says so.
+#[must_use]
+pub fn block_port(
+    space: u8,
+    address: u64,
+    width: u8,
+    legacy: u16,
+    legacy_len: u8,
+) -> (u16, u8, bool) {
+    if address == 0 {
+        return (legacy, legacy_len, false);
+    }
+    match u16::try_from(address) {
+        Ok(port) if space == 1 => (
+            port,
+            if legacy_len != 0 {
+                legacy_len
+            } else {
+                width / 8
+            },
+            false,
+        ),
+        _ => (legacy, legacy_len, true),
+    }
+}
 
 /// Parse the FADT at the given virtual address.
 ///
@@ -318,13 +352,8 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
         };
 
     serial_println!("[acpi]   DSDT at phys={:#x}", dsdt_phys);
-    // ACPI 2.0's 64-bit register blocks, which supersede the legacy fields
-    // wherever they are set (ACPI 6.5 5.2.9): an I/O-space one's port is
-    // used, with the legacy field's length unless that is 0, when the
-    // block's bit width gives it. One set beyond the I/O ports -- in memory,
-    // say -- is out of reach of this module, which knows the blocks only as
-    // ports: it is none, said, and the legacy field, which the spec then
-    // says to ignore, is not used in its place.
+    // ACPI 2.0's 64-bit register blocks ([`block_port`]), each said where
+    // it is set but out of reach.
     let x_block = |name: &str, offset: usize, legacy: u16, legacy_len: u8| -> (u16, u8) {
         if total_len < offset.saturating_add(core::mem::size_of::<GenericAddress>()) {
             return (legacy, legacy_len);
@@ -336,25 +365,18 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
             )
         };
         let (space, address, width) = (gas.address_space, gas.address, gas.bit_width);
-        if address == 0 {
-            return (legacy, legacy_len);
-        }
-        match u16::try_from(address) {
-            Ok(x) if space == 1 => (
-                x,
-                if legacy_len != 0 {
-                    legacy_len
+        let (port, len, out_of_reach) = block_port(space, address, width, legacy, legacy_len);
+        if out_of_reach {
+            serial_println!(
+                "[acpi]   X_{name}: address space {space}, address {address:#x}, beyond SlateOS's reach (known-issues A-FADT-BLOCKS-OUTSIDE-IO-SPACE-ARE-NOT-REACHED): {}",
+                if legacy == 0 {
+                    alloc::format!("no {name}")
                 } else {
-                    width / 8
-                },
-            ),
-            _ => {
-                serial_println!(
-                    "[acpi]   X_{name}: address space {space}, address {address:#x}, beyond SlateOS's reach: no {name}"
-                );
-                (0, 0)
-            }
+                    alloc::format!("the legacy {name}, {legacy:#x}, used instead")
+                }
+            );
         }
+        (port, len)
     };
     let (pm1a_evt, pm1_evt_len) = x_block(
         "PM1a_EVT_BLK",

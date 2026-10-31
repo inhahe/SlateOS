@@ -132,6 +132,12 @@ pub fn userspace_enabled() -> bool {
 /// are then the daemon's, as they are while it holds the kernel's NIC
 /// (`net::raw::is_claimed`) -- the kernel's NIC, which it does not claim,
 /// staying the kernel's.
+///
+/// Read when a socket is made, so the flip moves only sockets made after
+/// it: one made before -- during the daemon's wait of up to a minute --
+/// stays on the kernel's stack, over the kernel's NIC, until it is closed.
+/// It is set before init starts (`main.rs`), so that is none of any
+/// process's: only a kernel task's socket can be.
 static SERVES_A_CARD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Whether the persistent daemon serves sockets over a driver process's card
@@ -150,8 +156,30 @@ pub fn card_dns() -> Option<[u8; 4]> {
     // A daemon not answering has no resolver to offer: the caller falls back
     // to the kernel NIC's server, and the query, which goes to the daemon
     // all the same (`dns::dns_query_raw`), fails there with its own error.
-    let dns = daemon_interface().ok()?.dns;
+    let dns = card_interface().ok()?.dns;
     (dns != [0; 4]).then_some(dns)
+}
+
+/// The card the daemon serves ([`serves_a_card`]) as it says it
+/// ([`daemon_interface`]) -- or, while it waits for the card's network,
+/// not registered yet, an interface that is down with no address.
+///
+/// # Errors
+///
+/// [`daemon_interface`]'s, once the daemon has registered.
+pub fn card_interface() -> KernelResult<netipc::IfInfo> {
+    if !crate::ipc::service::is_registered(b"net.stack") {
+        return Ok(netipc::IfInfo {
+            mac: [0; 6],
+            ip4: [0; 4],
+            mask: [0; 4],
+            gateway: [0; 4],
+            ip6: [0; 16],
+            dns: [0; 4],
+            up: false,
+        });
+    }
+    daemon_interface()
 }
 
 /// The persistent daemon serves a driver process's card: it has registered,

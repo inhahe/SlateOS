@@ -283,8 +283,13 @@ out_free:
  * The file at `path` read as lx_read_file() reads one: Linux reads it in
  * init's mount namespace, so that a firmware file is found whoever asked;
  * a driver process sees the system's one file system, with its own
- * authority -- what the process was given to read with (a File
- * capability), as whom it runs.
+ * authority -- what the process was given to read with. For a driver,
+ * that is the FileTree capabilities naming the firmware directories: it
+ * may open, to read, a file whose path lies beneath one, and nothing else
+ * (the kernel's open_authority; design-decisions 1595), so a path
+ * elsewhere, or one whose symbolic link leads out of its tree, is refused
+ * EACCES. The layer's own test process is given a File capability for its
+ * runs that read anywhere.
  */
 ssize_t kernel_read_file_from_path_initns(const char *path, loff_t offset, void **buf,
 					  size_t buf_size, size_t *file_size,

@@ -7000,7 +7000,10 @@ fn reopen_own_fd(pid: u64, fd: i32, flags: u32) -> SyscallResult {
             FdEntry::file(new, status)
         }
         // A named pipe's end: its node opened again, as Linux opens the
-        // inode -- with the open's waits -- whatever its name is now.
+        // inode -- with the open's waits -- whatever its name is now. The
+        // end it holds again needs nothing more; another one is an open of
+        // the FIFO, which asks the File rights any open does -- WRITE to
+        // write, which `SYS_FIFO_OPEN` asks too.
         HandleKind::Pipe
             if crate::ipc::pipe::fifo_node(PipeHandle::from_raw(entry.raw_handle)).is_some() =>
         {
@@ -7009,6 +7012,18 @@ fn reopen_own_fd(pid: u64, fd: i32, flags: u32) -> SyscallResult {
             else {
                 return linux_err(errno::ENXIO);
             };
+            let holds = if PipeHandle::from_raw(entry.raw_handle).end() == PipeEnd::Read {
+                oflags::O_RDONLY
+            } else {
+                oflags::O_WRONLY
+            };
+            if access != holds
+                && let Err(e) = handlers::require_open_rights(OpenFlags::from_bits(
+                    translate_open_flags(access),
+                ))
+            {
+                return linux_err(linux_errno_for(e));
+            }
             return open_fifo_fd(
                 |a, nb| crate::ipc::fifo::open_held(hold, &path, a, nb),
                 flags,
@@ -7280,50 +7295,54 @@ fn open_kernel_path_install(
     if let Some(r) = try_open_evdev(path.as_bytes(), flags) {
         return r;
     }
-    if let Err(e) =
-        handlers::require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ)
-    {
-        return linux_err(linux_errno_for(e));
-    }
-
     let tmpfile = match linux_tmpfile_flags(flags) {
         Ok(t) => t,
         Err(e) => return linux_err(e),
     };
-    // Making a file with no name asks for File WRITE, as every create does.
-    if tmpfile.is_some()
-        && let Err(e) =
-            handlers::require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE)
-    {
-        return linux_err(linux_errno_for(e));
-    }
     let mut kernel_bits = tmpfile.unwrap_or_else(|| translate_open_flags(flags));
     // openat2 RESOLVE_NO_SYMLINKS: enforce no-symlink resolution in the VFS.
     if no_symlinks {
         kernel_bits |= crate::fs::handle::OpenFlags::NO_SYMLINKS.bits();
     }
     let kernel_flags = crate::fs::handle::OpenFlags::from_bits(kernel_bits);
-    // And the rights the flags ask for besides reading -- to truncate, to
-    // create -- which the open does itself.
-    if let Err(e) = handlers::require_open_rights(kernel_flags) {
-        return linux_err(linux_errno_for(e));
-    }
+    // What lets the caller open it: the File capability with the rights
+    // the flags ask for -- a file with no name is opened for writing, so
+    // asks WRITE -- or, to read only, a tree it lies beneath.
+    let authority = match handlers::open_authority(path, kernel_flags) {
+        Ok(a) => a,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
     // RESOLVE_BENEATH routes to the containment-checked open; everything
     // after this point -- handle registration, FdEntry, fd install -- is
     // identical, which is deliberate.  Lane B's request came from the two
     // implementations of openat2 drifting apart; a second install path here
     // would be the same mistake one layer down.
     let create_mode = linux_create_mode(mode);
-    let opened = match (beneath, tmpfile.is_some()) {
-        (Some(b), false) => {
+    let opened = match (authority, beneath, tmpfile.is_some()) {
+        (handlers::OpenAuthority::EveryFile, Some(b), false) => {
             crate::fs::handle::open_node_beneath_with_mode(b, kernel_flags, create_mode)
         }
-        (None, false) => crate::fs::handle::open_node_with_mode(path, kernel_flags, create_mode),
+        (handlers::OpenAuthority::EveryFile, None, false) => {
+            crate::fs::handle::open_node_with_mode(path, kernel_flags, create_mode)
+        }
         // O_TMPFILE: a file with no name, in the directory the path names.
-        (Some(b), true) => crate::fs::handle::open_tmpfile_beneath(b, kernel_flags, create_mode)
-            .map(crate::fs::handle::Opened::File),
-        (None, true) => crate::fs::handle::open_tmpfile(path, kernel_flags, create_mode)
-            .map(crate::fs::handle::Opened::File),
+        (handlers::OpenAuthority::EveryFile, Some(b), true) => {
+            crate::fs::handle::open_tmpfile_beneath(b, kernel_flags, create_mode)
+                .map(crate::fs::handle::Opened::File)
+        }
+        (handlers::OpenAuthority::EveryFile, None, true) => {
+            crate::fs::handle::open_tmpfile(path, kernel_flags, create_mode)
+                .map(crate::fs::handle::Opened::File)
+        }
+        // Beneath a tree, by the whole path, the tree's walk its containment.
+        (handlers::OpenAuthority::Trees(trees), None, false) => {
+            handlers::open_in_trees(&trees, |b| {
+                crate::fs::handle::open_node_beneath_with_mode(b, kernel_flags, create_mode)
+            })
+        }
+        // openat2's own RESOLVE_BENEATH is not combined with a tree's; and a
+        // file with no name is opened for writing, which no tree allows.
+        (handlers::OpenAuthority::Trees(_), _, _) => Err(KernelError::PermissionDenied),
     };
     // A named pipe: the opener gets its pipe, not the node.
     let opened = match opened {

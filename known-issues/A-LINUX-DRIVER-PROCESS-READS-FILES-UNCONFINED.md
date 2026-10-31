@@ -34,16 +34,35 @@ identity of their own (`identity: None` in `kernel/src/linuxdrv.rs`'s
 When the first driver that needs firmware runs on a real system (WiFi,
 roadmap 2.1), it must not be started with the unconfined right.
 
-**Fixed (lane A, 2026-10-30, design-decisions 1595).** The second of the two
-fixes above: a capability to read beneath one directory,
-`ResourceType::FileTree`, its id naming a directory the kernel registered
-(`fs::trees`). `SYS_FS_OPEN` opens, to read only, a file beneath that
-directory for a process holding no `File` capability, the walk confined
-beneath it (`open_beneath`); it satisfies no other file check. Every
-firmware-loading driver process is given trees for `/.boot-firmware` and
-`/lib/firmware` in place of the `File` capability (`linuxdrv::firmware_reading`),
-`mt7925e` and a driver `linuxdrv.serve` starts among them. Checked by the
-linuxdrv self-test: holding only the trees, the hello process loads the boot
-medium's firmware; holding a tree for another directory, it loads none. The
-first fix -- an unprivileged identity per driver -- is still worth having, and
-waits on lane B's user database.
+**Fixed (lane A, 2026-10-30, design-decisions 1595).** Both fixes above.
+
+- **A capability to read beneath one directory,**
+  `ResourceType::FileTree`, its id naming a directory the kernel registered
+  (`fs::trees`). Every open by name (`sys_fs_open`, `sys_fs_open_mode`, the
+  Linux `open`/`openat`) opens, to read only, a file beneath that directory
+  for a process holding no `File` capability, the walk confined beneath it
+  (`open_beneath`); it satisfies no other file check. Every
+  firmware-loading driver process is given trees for `/.boot-firmware` and
+  `/lib/firmware` in place of the `File` capability
+  (`linuxdrv::firmware_reading`).
+- **A tree is fixed.** Its directory must be on a read-only filesystem -- no
+  hard link can be planted in it, no file changed under it -- and it is
+  pinned to the directory's filesystem and inode, checked on every open: a
+  filesystem mounted over the path, or another directory put there, is not
+  the tree, which then reads nothing. The first review of this fix found
+  the tree escapable through exactly those (a root driver mounting over
+  `/lib/firmware`, a link planted in a writable directory).
+- **Driver processes are not root.** `linuxdrv::start` runs each as
+  `DRIVER_UID` (65533), and refuses one that comes out root: it cannot
+  mount, set the clock or reconfigure an interface, and what it may do is
+  the capabilities it is given (lane D asked to reserve the number:
+  `requests/a-d-reserve-uid-65533-for-linux-driver-processes.md`).
+
+Checked by `fs::trees::self_test` and `proc::spawn::self_test_open_rights`
+(ring 3: beneath, beside, `..`, a link, nested trees, a filesystem mounted
+over the tree), and the linuxdrv self-test: holding only the trees, the
+hello process loads the boot medium's firmware; holding a tree for another
+sealed directory, it loads none.
+
+What is left: an installed system's `/lib/firmware`, on its writable root,
+can be no tree (known-issues A-AN-INSTALLED-SYSTEMS-FIRMWARE-IS-NO-TREE).

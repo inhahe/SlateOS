@@ -874,8 +874,9 @@ def not_about_the_tree(qemu_stderr: str, exit_code: int) -> str | None:
 def parse_gate_skips(text: str) -> dict[str, str]:
     """run_checker's RUN_CHECKER_SKIPS as {gate label: the reason it gave}.
 
-    `text` is one `<label><TAB><reason>` line per gate that could not run
-    (scripts/run-checker.sh, run_checker_note_skip); empty means none did. A
+    `text` is one `<label><TAB><reason>` line per check that could not run
+    (scripts/run-checker.sh, run_checker_note_skip) -- a pre-build gate, or
+    the card boot after the main one; empty means none did. A
     line with no tab is all label, since a label is never empty and a reason
     may be. A label seen twice keeps its first reason.
     """
@@ -2405,9 +2406,13 @@ def main(argv=None) -> int:
                              "serving, counted where every boot can be added "
                              "up. Absent when the cache was off.")
     parser.add_argument("--gates-skipped", default=None, metavar="LINES",
-                        help="the pre-build gates that could not run, one "
+                        help="the checks that could not run, one "
                              "`<label><TAB><reason>` per line (run_checker's "
-                             "RUN_CHECKER_SKIPS); empty for none. Required "
+                             "RUN_CHECKER_SKIPS): the pre-build gates, and the "
+                             "card boot after the main boot (`card boot`), "
+                             "none of which the kernel's own boot depends on, "
+                             "so a PASS beside them still counts toward a "
+                             "fingerprint's clean streak; empty for none. Required "
                              "with --gates-seconds and refused without it, so "
                              "an absent field keeps meaning 'the gate phase "
                              "did not finish, or the row predates the field'.")

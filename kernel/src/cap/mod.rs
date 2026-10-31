@@ -83,6 +83,14 @@
 //! `verify_resource_id_zero_is_class_wide` in this module is the test that
 //! keeps the first property true.
 //!
+//! One type is the exception: a [`ResourceType::FileTree`] with id 0 names
+//! no tree and authorises nothing. A tree is a narrowing of `File`, and the
+//! class-wide authority over files -- every tree at once -- is the `File`
+//! capability, which is what a process to be given that is given; an id-0
+//! tree would be a second, weaker spelling of it. So the `admin` group's
+//! `(FileTree, 0, ALL)`, there because that group lists every type, adds
+//! nothing to the `File` it holds as well.
+//!
 //! ## Lock Ordering
 //!
 //! `CAP_TABLE` does not call into the scheduler or other IPC locks.
@@ -444,8 +452,9 @@ pub enum ResourceType {
     /// confined beneath it so that neither `..` nor a symbolic link leads
     /// out -- for a process holding no `File` capability, which is every
     /// file. The right a Linux driver process is given to read its firmware.
-    /// `resource_id` 0 names no tree. Satisfies no other file check, and
-    /// implies no Linux capability.
+    /// `resource_id` 0 names no tree -- the exception to the module's
+    /// id-0 rule, said there. Satisfies no other file check, and implies no
+    /// Linux capability.
     FileTree = 37,
 }
 

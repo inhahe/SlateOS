@@ -2055,11 +2055,11 @@ launch_qemu() {
 # command line led by the card boot's own words (card_boot_cmdline), which
 # win over any later ones -- the kernel takes an option's first value:
 # `linuxdrv.serve` starts Linux's CARD_BOOT_DRIVER serving the spare 82574
-# for the system's life -- net3, the second e1000e, at CARD_BOOT_BDF by
+# for the system's life -- CARD_BOOT_NETDEV, the second e1000e, at CARD_BOOT_BDF by
 # QEMU_MACHINE's device order -- and `net.nic` has the daemon serve every
 # socket over it, so that every persistent-daemon check runs over the card.
 # Self-tests are skipped (`selftest.skip=1`): the main boot ran them, and
-# without them the daemon's checks come within a minute. net3 is on a network
+# without them the daemon's checks come within a minute. The card is on a network
 # of its own (CARD_BOOT_SUBNET), so a check that reached the kernel's NIC
 # instead cannot pass by accident; and whatever the main boot's daemon
 # reached beyond QEMU's network, the card boot's must reach too
@@ -2075,10 +2075,12 @@ launch_qemu() {
 # pull does not take before the driver is started, the cable stays in and
 # the wait goes unchecked, which is said.
 #
-# The card under test, and every line about it, from these three.
+# The card under test, and every line about it, from these four: QEMU's
+# netdev behind it (QEMU_MACHINE), the one the cable step pulls.
 CARD_BOOT_DRIVER="e1000e"
 CARD_BOOT_BDF="00:05.0"
 CARD_BOOT_SUBNET="10.0.5"
+CARD_BOOT_NETDEV="net3"
 CARD_BOOT_SERVICE="nic.$CARD_BOOT_DRIVER"
 CARD_BOOT_WORDS="net.userspace=1 selftest.skip=1 linuxdrv.serve=$CARD_BOOT_DRIVER@$CARD_BOOT_BDF net.nic=$CARD_BOOT_SERVICE"
 # The daemon's closing line, whichever NIC it served, and that line over the
@@ -2092,6 +2094,13 @@ CARD_BOOT_LEASED="[netstack] serving over $CARD_BOOT_SERVICE: "
 CARD_BOOT_WAITING="[netstack] serve: no address over $CARD_BOOT_SERVICE yet"
 # What the kernel prints when the persistent daemon could not be started.
 CARD_BOOT_NO_DAEMON="persistent userspace netstack (ring 3) startup failed"
+# What the processes the card boot rests on print when they panic: the
+# daemon's panic handler (services/netstack) and the driver layer's Rust
+# half's (linuxdrv/kit). The kernel's own is KERNEL_DEATH_RE's.
+CARD_BOOT_PANICS=(
+    "!!! PANIC in netstack !!!"
+    "[lx] the layer's Rust half panicked"
+)
 # Lines the persistent daemon prints only when it reached past QEMU's
 # network: each one the main boot printed, the card boot must print too.
 CARD_BOOT_UPSTREAM=(
@@ -2099,8 +2108,6 @@ CARD_BOOT_UPSTREAM=(
     "[spawn]   persistent netstack TCP: HTTP response received over the daemon"
     "[spawn]   native resolver parity: SYS_DNS_RESOLVE resolves example.com"
 )
-# How long the card boot tries to pull the cable before it gives the pull up.
-CARD_BOOT_PULL_SECS=10
 # 1 while the ESP carries the card boot's command line (card_boot_restore).
 CARD_BOOT_ACTIVE=0
 # Set by card_boot once its QEMU has run and the card boot failed, for
@@ -2108,10 +2115,11 @@ CARD_BOOT_ACTIVE=0
 CARD_BOOT_FAILED=0
 # The cable's state, card_boot_cable_step's: 0 to pull, 1 out until the
 # daemon says it waits, 2 in. CARD_BOOT_PULLED is "pulled" once it was out
-# before the driver started; CARD_BOOT_PULL_UNTIL is when to give the pull up.
+# before the driver started; CARD_BOOT_PULL_FAILED what the monitor last
+# answered a pull that failed.
 CARD_BOOT_CABLE=2
 CARD_BOOT_PULLED=""
-CARD_BOOT_PULL_UNTIL=0
+CARD_BOOT_PULL_FAILED=""
 
 # The card boot's kernel command line: its deadline -- the liveness
 # watchdog's, timed to land before the harness gives up on it -- and its
@@ -2136,28 +2144,27 @@ card_boot_restore() {
 }
 
 # One step of the card boot's cable (CARD_BOOT_CABLE), each turn of its wait:
-# pulled through the monitor as soon as QEMU answers -- given up, and said
-# so, after CARD_BOOT_PULL_SECS, or once the kernel has started the driver,
-# whose first look at the card a pull must come before -- and plugged back in
-# once the daemon says it waits for the card's network. A set_link that fails
-# is said, with what QEMU answered, and tried again the next step.
+# pulled through the monitor as soon as QEMU answers -- tried each step until
+# the kernel has started the driver, whose first look at the card a pull must
+# come before, and then given up and said so, with what the monitor last
+# answered -- and plugged back in once the daemon says it waits for the
+# card's network, a plug that fails said and tried again the next step.
 card_boot_cable_step() {
     local said rc=0
     case "$CARD_BOOT_CABLE" in
         0)
             if [ -f "$CARD_SERIAL" ] && grep -a -q -F -- "$CARD_BOOT_SERVED" "$CARD_SERIAL"; then
                 CARD_BOOT_CABLE=2
-                echo "=== Card boot: the cable was not pulled before the driver started: the wait for the card's network is not checked ==="
+                echo "=== Card boot: the cable was not pulled before the driver started${CARD_BOOT_PULL_FAILED:+ (the monitor last answered $CARD_BOOT_PULL_FAILED)}: the wait for the card's network is not checked ==="
                 return 0
             fi
-            said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link net3 off" 2>&1)" || rc=$?
+            said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link $CARD_BOOT_NETDEV off" 2>&1)" || rc=$?
             if [ "$rc" -eq 0 ]; then
                 CARD_BOOT_CABLE=1
                 CARD_BOOT_PULLED="pulled"
                 echo "=== Card boot: the spare card's cable pulled ==="
-            elif [ "$(date +%s)" -ge "$CARD_BOOT_PULL_UNTIL" ]; then
-                CARD_BOOT_CABLE=2
-                echo "=== Card boot: the cable could not be pulled (rc $rc${said:+: $said}): the wait for the card's network is not checked ==="
+            else
+                CARD_BOOT_PULL_FAILED="rc $rc${said:+: $said}"
             fi
             ;;
         1)
@@ -2168,12 +2175,12 @@ card_boot_cable_step() {
             local waits=0
             [ -f "$CARD_SERIAL" ] && waits="$(grep -a -c -F -- "$CARD_BOOT_WAITING" "$CARD_SERIAL")" || true
             [ "${waits:-0}" -ge 2 ] || return 0
-            said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link net3 on" 2>&1)" || rc=$?
+            said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link $CARD_BOOT_NETDEV on" 2>&1)" || rc=$?
             if [ "$rc" -eq 0 ]; then
                 CARD_BOOT_CABLE=2
                 echo "=== Card boot: the daemon waits for the card's network; its cable plugged in ==="
             else
-                echo "=== Card boot: set_link net3 on failed (rc $rc${said:+: $said}); trying again ===" >&2
+                echo "=== Card boot: set_link $CARD_BOOT_NETDEV on failed (rc $rc${said:+: $said}); trying again ===" >&2
             fi
             ;;
     esac
@@ -2188,15 +2195,19 @@ card_boot_cable_step() {
 # Read up to the daemon's closing line over the card (CARD_BOOT_DONE), or the
 # whole log when it never came. A failure is what the main boot's own checks
 # call one (check_selftest_failures, check_liveness_failures,
-# kernel_is_dead's KERNEL_DEATH_RE), a check's FAIL line, and a panic of any
-# process -- the daemon's or a driver's. A check that skipped for want of an
+# kernel_is_dead's KERNEL_DEATH_RE), a check's FAIL line, and a panic of the
+# daemon or of a driver process (CARD_BOOT_PANICS). A check that skipped for want of an
 # upstream passes, as it does in the main boot -- unless the main boot's
 # daemon reached that upstream (CARD_BOOT_UPSTREAM). The card must be served
-# on net3's own network, and SYS_NET_IF_INFO must say so. With $3 "pulled",
+# on its own network (CARD_BOOT_SUBNET), and SYS_NET_IF_INFO must say so. With $3 "pulled",
 # the card's cable was out at the start: the daemon must have said twice
 # that it waited for the card's network, before it served over it.
 card_boot_verdict() {
     local log="$1" main="${2:-}" pulled="${3:-}" upto part bad want served proof waited
+    local panics=() panic
+    for panic in "${CARD_BOOT_PANICS[@]}"; do
+        panics+=(-e "$panic")
+    done
     if [ ! -f "$log" ]; then
         echo "no serial log"
         echo "none at $log"
@@ -2218,7 +2229,7 @@ card_boot_verdict() {
     fi
     bad="$( { grep -a -i -F -- "self-test failed" <<< "$part" || true
               grep -a -E -- "$LIVENESS_FAILURE_RE" <<< "$part" || true
-              grep -a -F -e "  FAIL" -e "$CARD_BOOT_NO_DAEMON" -e "PANIC" -e "panicked" <<< "$part" || true; } )"
+              grep -a -F -e "  FAIL" -e "$CARD_BOOT_NO_DAEMON" "${panics[@]}" <<< "$part" || true; } )"
     if [ -n "$bad" ]; then
         echo "a check failed"
         echo "${bad%%$'\n'*}" | cut -c1-200
@@ -2330,7 +2341,7 @@ card_boot() {
     CARD_BOOT_PULLED=""
     if [ -n "$CABLE_PY" ] && [ "${#MONITOR_ARGS[@]}" -gt 0 ]; then
         CARD_BOOT_CABLE=0
-        CARD_BOOT_PULL_UNTIL=$(( $(date +%s) + CARD_BOOT_PULL_SECS ))
+        CARD_BOOT_PULL_FAILED=""
     else
         CARD_BOOT_CABLE=2
         echo "=== Card boot: the cable stays in (no monitor, or no Python to drive it): the wait for the card's network is not checked ==="
@@ -10809,8 +10820,8 @@ QEMU_MACHINE=(
     -device rtl8139,netdev=net1,mac=52:54:00:12:34:57
     -netdev user,id=net2
     -device virtio-net-pci,netdev=net2,mac=52:54:00:12:34:58
-    -netdev "user,id=net3,net=$CARD_BOOT_SUBNET.0/24"
-    -device e1000e,netdev=net3,mac=52:54:00:12:34:59
+    -netdev "user,id=$CARD_BOOT_NETDEV,net=$CARD_BOOT_SUBNET.0/24"
+    -device "e1000e,netdev=$CARD_BOOT_NETDEV,mac=52:54:00:12:34:59"
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN"
     "${ESP_DRIVE_ARGS[@]}"
     -device virtio-blk-pci,drive=swap-disk

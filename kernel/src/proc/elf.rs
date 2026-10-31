@@ -26073,8 +26073,10 @@ pub fn build_native_handle_ownership_test_elf(
     buf
 }
 
-/// Build a native-ABI test ELF that opens one path with one set of flags
-/// (`SYS_FS_OPEN`) and says, by its exit code, what the open answered:
+/// Build a native-ABI test ELF that opens one path with one set of flags --
+/// with `syscall`, `SYS_FS_OPEN` or `SYS_FIFO_OPEN` (whose `arg3` bit 0 asks
+/// not to wait for the other end) -- and says, by its exit code, what the
+/// open answered:
 ///
 /// | code | meaning |
 /// |---|---|
@@ -26088,31 +26090,40 @@ pub fn build_native_handle_ownership_test_elf(
 /// handle, when there is one, is left open: the process's exit closes it.
 ///
 /// `path_nul` must be NUL-terminated; `path_len` is the path's length
-/// without the NUL; `flags` are `fs::handle::OpenFlags` bits.
+/// without the NUL; `flags` are `fs::handle::OpenFlags` bits; `arg3` the
+/// call's fourth argument.
 #[must_use]
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
-pub fn build_open_probe_elf(path_nul: &[u8], path_len: u32, flags: u32) -> alloc::vec::Vec<u8> {
+// The code is built by appending to a `Vec`, each patched byte at the
+// length it was pushed at, so every index is in bounds and every
+// difference is a later length less an earlier one; a jump's distance is a
+// few dozen bytes, which a byte holds.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_open_probe_elf(
+    syscall: u32,
+    path_nul: &[u8],
+    path_len: u32,
+    flags: u32,
+    arg3: u32,
+) -> alloc::vec::Vec<u8> {
     const SYS_EXIT: u32 = 1;
-    const SYS_FS_OPEN: u32 = 610;
     /// `KernelError::PermissionDenied` as it arrives in `rax`.
     const PERMISSION_DENIED: i32 = -400;
 
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120; // 64 (ehdr) + 56 (one phdr)
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-
-    /// `mov edi, imm32; mov eax, SYS_EXIT; syscall` — 12 bytes, fixed width,
+    /// `mov edi, imm32; mov eax, SYS_EXIT; syscall` -- 12 bytes, fixed width,
     /// which is what lets the jumps above each one use a known rel8.
     fn exit_with(code: &mut alloc::vec::Vec<u8>, v: u32) {
         code.push(0xBF);
         code.extend_from_slice(&v.to_le_bytes());
-        code.extend_from_slice(&[0xB8]);
+        code.push(0xB8);
         code.extend_from_slice(&SYS_EXIT.to_le_bytes());
         code.extend_from_slice(&[0x0F, 0x05]);
     }
 
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
     let path_imm = code.len();
     code.extend_from_slice(&[0u8; 8]);
@@ -26120,70 +26131,134 @@ pub fn build_open_probe_elf(path_nul: &[u8], path_len: u32, flags: u32) -> alloc
     code.extend_from_slice(&path_len.to_le_bytes());
     code.push(0xBA); // mov edx, flags
     code.extend_from_slice(&flags.to_le_bytes());
-    code.push(0xB8); // mov eax, SYS_FS_OPEN
-    code.extend_from_slice(&SYS_FS_OPEN.to_le_bytes());
+    code.extend_from_slice(&[0x41, 0xBA]); // mov r10d, arg3
+    code.extend_from_slice(&arg3.to_le_bytes());
+    code.push(0xB8); // mov eax, syscall
+    code.extend_from_slice(&syscall.to_le_bytes());
     code.extend_from_slice(&[0x0F, 0x05]); // syscall
 
     code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
     code.extend_from_slice(&[0x78, 0x00]); // js .refused
     let js_refused = code.len() - 1;
     exit_with(&mut code, 0);
-    let refused = code.len();
-    code[js_refused] = ((refused as isize) - (js_refused as isize + 1)) as u8;
+    code[js_refused] = (code.len() - (js_refused + 1)) as u8;
 
     code.extend_from_slice(&[0x48, 0x3D]); // cmp rax, imm32 (sign-extended)
     code.extend_from_slice(&PERMISSION_DENIED.to_le_bytes());
     code.extend_from_slice(&[0x74, 0x00]); // je .denied
     let je_denied = code.len() - 1;
     exit_with(&mut code, 2);
-    let denied = code.len();
-    code[je_denied] = ((denied as isize) - (je_denied as isize + 1)) as u8;
+    code[je_denied] = (code.len() - (je_denied + 1)) as u8;
     exit_with(&mut code, 1);
-    code.push(0xCC); // int3 — unreachable
+    code.push(0xCC); // int3 -- unreachable
 
-    // --- data ----------------------------------------------------------
-    let code_len = code.len();
-    let path_off = code_offset as usize + code_len;
-    let file_size = path_off + path_nul.len();
+    // The path after the code, in the one segment code_elf maps.
+    let path_vaddr = CODE_ELF_LOAD_VADDR + code.len() as u64;
+    code[path_imm..path_imm + 8].copy_from_slice(&path_vaddr.to_le_bytes());
+    code.extend_from_slice(path_nul);
+    code_elf(&code, ELFOSABI_SYSV)
+}
 
-    let vaddr_of = |fo: usize| load_vaddr + (fo as u64 - code_offset);
-    let pv = vaddr_of(path_off).to_le_bytes();
-    code[path_imm..path_imm + 8].copy_from_slice(&pv);
+/// Build a Linux-ABI test ELF that opens the named pipe at `fifo_nul` to read
+/// without waiting (`O_RDONLY | O_NONBLOCK`), puts that at descriptor 9, and
+/// opens it again for writing through `/proc/self/fd/9` -- the reopen that
+/// `/dev/stdin` and `/dev/fd/N` lead to (`syscall::linux`'s `reopen_own_fd`)
+/// -- saying by its exit code what the reopen answered:
+///
+/// | code | meaning |
+/// |---|---|
+/// | `0` | opened |
+/// | `1` | refused with `EACCES` |
+/// | `2` | refused otherwise |
+/// | `3` | the first open, or the `dup2`, failed |
+///
+/// For the File rights a reopen for more than the descriptor holds asks,
+/// which only a process holding just those can show. A write end opened
+/// while the process holds the read end has its reader, so it never waits.
+///
+/// `fifo_nul` must be NUL-terminated.
+#[must_use]
+// The code is built by appending to a `Vec`, each patched byte at the
+// length it was pushed at, so every index is in bounds and every
+// difference is a later length less an earlier one; a jump's distance is
+// under a hundred bytes, which a byte holds.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_linux_fifo_reopen_probe_elf(fifo_nul: &[u8]) -> alloc::vec::Vec<u8> {
+    const SYS_OPEN: u32 = 2;
+    const SYS_DUP2: u32 = 33;
+    const SYS_EXIT: u32 = 60;
+    const O_WRONLY: u32 = 1;
+    const O_NONBLOCK: u32 = 0o4000;
+    /// `-EACCES` as it arrives in `rax`, as `cmp`'s sign-extended byte.
+    const MINUS_EACCES: u8 = 0xF3;
+    const REOPEN: &[u8] = b"/proc/self/fd/9\0";
 
-    let mut buf = alloc::vec![0u8; file_size];
-    buf[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
-    buf[4] = 2; // ELFCLASS64
-    buf[5] = 1; // ELFDATA2LSB
-    buf[6] = EV_CURRENT;
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr);
-    write_u64(&mut buf, 32, phdr_offset);
-    write_u64(&mut buf, 40, 0);
-    write_u32(&mut buf, 48, 0);
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1);
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
+    /// `mov edi, imm32; mov eax, SYS_EXIT; syscall` -- 12 bytes.
+    fn exit_with(code: &mut alloc::vec::Vec<u8>, v: u32) {
+        code.push(0xBF);
+        code.extend_from_slice(&v.to_le_bytes());
+        code.push(0xB8);
+        code.extend_from_slice(&SYS_EXIT.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0x05]);
+    }
+    /// `mov esi, flags; mov eax, SYS_OPEN; syscall; test rax, rax; js` --
+    /// the `js`'s displacement byte's offset returned, to patch.
+    fn open_with(code: &mut alloc::vec::Vec<u8>, flags: u32) -> usize {
+        code.push(0xBE);
+        code.extend_from_slice(&flags.to_le_bytes());
+        code.push(0xB8);
+        code.extend_from_slice(&SYS_OPEN.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0, 0x78, 0x00]);
+        code.len() - 1
+    }
+    fn land(code: &mut [u8], jump: usize, at: usize) {
+        code[jump] = (at - (jump + 1)) as u8;
+    }
 
-    let ph = phdr_offset as usize;
-    let seg_len = (file_size - code_offset as usize) as u64;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_W | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, seg_len);
-    write_u64(&mut buf, ph + 40, seg_len);
-    write_u64(&mut buf, ph + 48, 0x1000);
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &fifo
+    let fifo_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    let opened_failed = open_with(&mut code, O_NONBLOCK);
+    code.extend_from_slice(&[0x48, 0x89, 0xC7]); // mov rdi, rax
+    code.push(0xBE); // mov esi, 9
+    code.extend_from_slice(&9u32.to_le_bytes());
+    code.push(0xB8); // mov eax, SYS_DUP2
+    code.extend_from_slice(&SYS_DUP2.to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0, 0x78, 0x00]); // syscall; test; js
+    let dup_failed = code.len() - 1;
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &reopen
+    let reopen_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    let refused = open_with(&mut code, O_WRONLY | O_NONBLOCK);
+    exit_with(&mut code, 0);
+    let at = code.len();
+    land(&mut code, refused, at);
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, MINUS_EACCES]); // cmp rax, -EACCES
+    code.extend_from_slice(&[0x74, 0x00]); // je .denied
+    let denied = code.len() - 1;
+    exit_with(&mut code, 2);
+    let at = code.len();
+    land(&mut code, denied, at);
+    exit_with(&mut code, 1);
+    let at = code.len();
+    land(&mut code, opened_failed, at);
+    land(&mut code, dup_failed, at);
+    exit_with(&mut code, 3);
+    code.push(0xCC); // int3 -- unreachable
 
-    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
-    buf[path_off..path_off + path_nul.len()].copy_from_slice(path_nul);
-
-    buf
+    // The two paths after the code, in the one segment code_elf maps.
+    let fifo_vaddr = CODE_ELF_LOAD_VADDR + code.len() as u64;
+    code[fifo_imm..fifo_imm + 8].copy_from_slice(&fifo_vaddr.to_le_bytes());
+    code.extend_from_slice(fifo_nul);
+    let reopen_vaddr = CODE_ELF_LOAD_VADDR + code.len() as u64;
+    code[reopen_imm..reopen_imm + 8].copy_from_slice(&reopen_vaddr.to_le_bytes());
+    code.extend_from_slice(REOPEN);
+    linux_code_elf(&code)
 }
 
 /// Build a **Linux-ABI** test ELF that exercises `openat2(2)` — in particular
@@ -29911,8 +29986,11 @@ fn linux_code_elf(code: &[u8]) -> alloc::vec::Vec<u8> {
     code_elf(code, ELFOSABI_GNU)
 }
 
+/// Where [`code_elf`] loads its code, and enters it.
+const CODE_ELF_LOAD_VADDR: u64 = 0x0000_0040_0000_0000;
+
 /// An ELF of `code` alone: one `PT_LOAD` segment, readable and executable, at
-/// 0x40_0000_0000, entered at its first byte, `osabi` in `e_ident`
+/// [`CODE_ELF_LOAD_VADDR`], entered at its first byte, `osabi` in `e_ident`
 /// (`ELFOSABI_SYSV` for a native program). What every hand-built ring-3 test
 /// program is wrapped in.
 #[allow(
@@ -29926,7 +30004,7 @@ fn code_elf(code: &[u8], osabi: u8) -> alloc::vec::Vec<u8> {
     let phdr_offset: u64 = 64;
     let code_offset: u64 = 120;
     let code_size = code.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+    let load_vaddr = CODE_ELF_LOAD_VADDR;
 
     let mut buf = vec![0u8; (code_offset + code_size) as usize];
 

@@ -1787,10 +1787,11 @@ def _shell_assignment(name):
 #: The card boot's settings, in boot-test.sh's order: each later one may be
 #: made of the earlier ones.
 _CARD_BOOT_SETTINGS = ("CARD_BOOT_DRIVER", "CARD_BOOT_BDF", "CARD_BOOT_SUBNET",
-                       "CARD_BOOT_SERVICE", "CARD_BOOT_WORDS", "CARD_BOOT_CLOSING",
-                       "CARD_BOOT_DONE", "CARD_BOOT_SERVED", "CARD_BOOT_LEASED",
-                       "CARD_BOOT_WAITING", "CARD_BOOT_NO_DAEMON", "CARD_BOOT_UPSTREAM",
-                       "KERNEL_DEATH_RE", "LIVENESS_FAILURE_RE")
+                       "CARD_BOOT_NETDEV", "CARD_BOOT_SERVICE", "CARD_BOOT_WORDS",
+                       "CARD_BOOT_CLOSING", "CARD_BOOT_DONE", "CARD_BOOT_SERVED",
+                       "CARD_BOOT_LEASED", "CARD_BOOT_WAITING", "CARD_BOOT_NO_DAEMON",
+                       "CARD_BOOT_PANICS", "CARD_BOOT_UPSTREAM", "KERNEL_DEATH_RE",
+                       "LIVENESS_FAILURE_RE")
 
 
 def _card_boot_settings():
@@ -1798,19 +1799,32 @@ def _card_boot_settings():
     return "\n".join(_shell_assignment(n) for n in _CARD_BOOT_SETTINGS) + "\n"
 
 
+#: Every card-boot setting's value, made by `_card_boot_value`'s one bash.
+_card_boot_values_made = {}
+
+
 def _card_boot_value(name):
-    """The value boot-test.sh's settings give `name`, as bash makes it."""
-    tmp = new_fixture()
-    try:
-        with open(os.path.join(tmp, "harness.sh"), "w",
-                  encoding="utf-8", newline="\n") as handle:
-            handle.write("set -euo pipefail\n" + _card_boot_settings()
-                         + f'printf "%s" "${name}"\n')
-        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, f"the value of {name}")
-        assert proc is not None and proc.returncode == 0, f"{name}: {proc and proc.stdout}"
-        return proc.stdout
-    finally:
-        drop_fixture(tmp)
+    """The value boot-test.sh's settings give `name`, as bash makes it -- an
+    array's elements one to a line. Every setting is made by one bash, the
+    first time any is asked for."""
+    if not _card_boot_values_made:
+        tmp = new_fixture()
+        try:
+            with open(os.path.join(tmp, "harness.sh"), "w",
+                      encoding="utf-8", newline="\n") as handle:
+                handle.write("set -euo pipefail\n" + _card_boot_settings()
+                             + f"for name in {' '.join(_CARD_BOOT_SETTINGS)}; do\n"
+                             + '    every="$name[@]"\n'
+                             + '    printf "%s\\0" "$name" "$(printf "%s\\n" "${!every}")"\n'
+                             + "done\n")
+            proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the card boot's settings")
+            assert proc is not None and proc.returncode == 0, \
+                f"the card boot's settings: {proc and proc.stdout}"
+            made = proc.stdout.split("\0")
+            _card_boot_values_made.update(zip(made[0::2], made[1::2]))
+        finally:
+            drop_fixture(tmp)
+    return _card_boot_values_made[name]
 
 
 def _card_boot_verdict(serial_text, main_text=None, pulled=""):
@@ -1927,6 +1941,9 @@ def test_the_card_boot_passes_only_a_daemon_that_served_the_card_on_its_own_netw
         ("a driver process's Rust half panicking fails",
          "[boot] up\n" + _SERVED + _LEASED + "[lx] the layer's Rust half panicked\n" + _TOLD
          + _DONE, None, ("a check failed", "[lx] the layer's Rust half panicked")),
+        ("a line that only mentions a panic passes",
+         "[boot] up\n" + _SERVED + _LEASED + "[proc] panic=0: no reboot on a PANIC\n"
+         + "[spawn] a child that panicked was reaped\n" + _TOLD + _DONE, None, ("", "")),
         ("the daemon serving the kernel's NIC instead fails, saying so",
          "[boot] up\n" + _LEASED.replace("nic.e1000e", "the kernel's NIC") + other_nic, None,
          ("the daemon served another card", other_nic.strip())),
@@ -1996,7 +2013,7 @@ def _card_cable(body):
                 "set -euo pipefail\n"
                 + _card_boot_settings()
                 + "CARD_SERIAL=serial.txt\nSCRIPT_DIR=.\nMONITOR_PORT=1\nCABLE_PY=bash\n"
-                "CARD_BOOT_CABLE=0\nCARD_BOOT_PULLED=\nCARD_BOOT_PULL_UNTIL=$(( $(date +%s) + 600 ))\n"
+                "CARD_BOOT_CABLE=0\nCARD_BOOT_PULLED=\nCARD_BOOT_PULL_FAILED=\n"
                 + extract_shell_function("card_boot_cable_step") + "\n\n"
                 "step() { card_boot_cable_step 2>>errors.txt; "
                 "echo \"cable=$CARD_BOOT_CABLE pulled=$CARD_BOOT_PULLED\"; }\n"
@@ -2013,9 +2030,11 @@ def test_the_card_boots_cable_is_pulled_first_and_plugged_in_when_the_daemon_wai
     once the daemon has said twice that it waits for the card's network --
     once, a card with its cable in says too -- retrying that too,
     and saying each failure with what QEMU answered; and gives the pull up --
-    the cable left in, said, and the wait not counted as checked -- once the
-    kernel has started the driver, or once its time is up.
+    the cable left in, said with what QEMU last answered, and the wait not
+    counted as checked -- once the kernel has started the driver, and only
+    then, however long the monitor takes to answer.
     """
+    netdev = _card_boot_value("CARD_BOOT_NETDEV")
     waiting = _card_boot_value("CARD_BOOT_WAITING") + ": asked again within 4 s\n"
     served = _card_boot_value("CARD_BOOT_SERVED") + " (pid 10)\n"
     out = _card_cable(
@@ -2048,8 +2067,8 @@ def test_the_card_boots_cable_is_pulled_first_and_plugged_in_when_the_daemon_wai
         calls = lines[lines.index("calls:") + 1:] if "calls:" in lines else []
         check("set_link off twice (once refused), on twice (once refused), nothing else",
               [line for line in calls if line.startswith("hmp ")],
-              ["hmp --hmp 1 set_link net3 off", "hmp --hmp 1 set_link net3 off",
-               "hmp --hmp 1 set_link net3 on", "hmp --hmp 1 set_link net3 on"])
+              [f"hmp --hmp 1 set_link {netdev} {state}"
+               for state in ("off", "off", "on", "on")])
         check("the refused plug said so, with QEMU's answer",
               ("failures: 1" in out, "answered: 1" in out), (True, True))
     late = _card_cable(f"printf '%s' {_sq(served)} > serial.txt\nstep\n"
@@ -2059,11 +2078,14 @@ def test_the_card_boots_cable_is_pulled_first_and_plugged_in_when_the_daemon_wai
                     "not pulled before the driver started" in late,
                     "not-called" in late),
           (["cable=2 pulled="], True, True))
-    timed_out = _card_cable("echo 2 > rc.txt\nCARD_BOOT_PULL_UNTIL=0\nstep\n")
-    check("a pull refused past its time is given up, said with QEMU's answer",
-          timed_out and ([l for l in timed_out.splitlines() if l.startswith("cable=")],
-                         "could not be pulled (rc 2: QEMU said no)" in timed_out),
-          (["cable=2 pulled="], True))
+    refused = _card_cable("echo 2 > rc.txt\nstep\nstep\nstep\n"
+                          + f"printf '%s' {_sq(served)} > serial.txt\nstep\n")
+    check("a pull refused is tried each step until the driver starts, then given up, "
+          "said with QEMU's last answer",
+          refused and ([l for l in refused.splitlines() if l.startswith("cable=")],
+                       "not pulled before the driver started (the monitor last answered "
+                       "rc 2: QEMU said no)" in refused),
+          (["cable=0 pulled="] * 3 + ["cable=2 pulled="], True))
 
 
 def _limine_conf(cmdline, template):
@@ -2205,6 +2227,11 @@ def test_every_line_the_card_boot_reads_is_printed_by_the_tree():
     check("there are upstream proofs", len(upstream) >= 3, True)
     for proof in upstream:
         check(f"the kernel prints the upstream proof {proof!r}", proof in spawn, True)
+    kit = source("linuxdrv", "kit", "src", "sys.rs")
+    check("the daemon's and the driver layer's panic handlers print the panics read",
+          _card_boot_value("CARD_BOOT_PANICS").splitlines(),
+          [line for line in ("!!! PANIC in netstack !!!", "[lx] the layer's Rust half panicked")
+           if line + "\\n" in daemon + kit])
 
 
 def test_a_watchdog_breadcrumb_is_not_the_boots_own_output():

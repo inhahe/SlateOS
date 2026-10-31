@@ -4371,41 +4371,61 @@ pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
     Ok(())
 }
 
-/// Ring-3 proof that a process holding `File` `READ` alone can neither
-/// truncate nor create through an open's flags, while one holding `READ` and
-/// `WRITE` can both ([`crate::syscall::handlers`]'s `require_open_rights`),
-/// and that a
-/// `FileTree` capability (design-decisions 1595) opens, to read only, files
-/// beneath its directory and no others: not one beside it, not one reached
-/// by `..` or a symbolic link out of it, and nothing for a tree naming
-/// another directory. A process holding exactly those rights runs
-/// [`elf::build_open_probe_elf`] per case; the kernel's own context bypasses
-/// every check, so nothing less shows them. Afterwards the file a refused
-/// truncation named is still whole, and the one a refused create named does
-/// not exist.
+/// Ring-3 proof of the rights an open asks
+/// ([`crate::syscall::handlers`]'s `require_open_rights` and
+/// `open_authority`), from processes holding exactly those rights, since the
+/// kernel's own context bypasses every check.
+///
+/// A process holding `File` `READ` alone opens to read -- `O_RDONLY |
+/// O_CREAT` of a file that exists too, as `flock(1)` opens one -- but neither
+/// truncates nor creates, nor opens a named pipe's write end, natively
+/// (`SYS_FIFO_OPEN`) or by reopening its read end through `/proc/self/fd`;
+/// one holding `READ` and `WRITE` does each.
+///
+/// A `FileTree` capability (design-decisions 1595) opens, to read only,
+/// files beneath its directory -- on a filesystem sealed read-only, as a
+/// tree's must be -- `.` components and all, and through a tree nested in
+/// it; and no others: not one beside it, not one reached by `..` or a
+/// symbolic link out of it, not its parent's through a tree nested in it,
+/// nothing for a tree naming another directory, and nothing once another
+/// filesystem is mounted over its directory. Of two nested trees held, a
+/// path the nearer refuses opens through the other.
+///
+/// Afterwards the file a refused truncation named is still whole, and the
+/// one a refused create named does not exist.
 ///
 /// # Errors
 ///
 /// `InternalError`, every failing case said, when one answers otherwise;
 /// skipped, and said so, where no filesystem can hold the fixture.
-#[allow(clippy::cast_possible_truncation)]
 pub fn self_test_open_rights() -> KernelResult<()> {
     use crate::fs::Vfs;
     use crate::fs::handle::OpenFlags as F;
-    /// The probe's directory, a tree of its own, and a file in it.
+    /// The writable fixture's directory, and its files.
     const DIR: &str = "/slateos-open-rights";
     const FILE: &str = "/slateos-open-rights/f.txt";
-    /// What the file holds: a truncation refused must leave it whole.
+    /// What the files hold: a truncation refused must leave it whole.
     const CONTENT: &[u8] = b"slateos open rights";
+    /// What a truncation allowed empties.
+    const EMPTIED: &str = "/slateos-open-rights/t.txt";
     /// A name nothing makes: a create refused must leave it unmade.
     const NEW: &str = "/slateos-open-rights/new.txt";
     /// A name the create allowed makes.
     const MADE: &str = "/slateos-open-rights/made.txt";
-    /// Outside the tree, beside it: `/slateos-open-rights2` is not beneath
-    /// `/slateos-open-rights`.
-    const BESIDE: &str = "/slateos-open-rights2.txt";
-    /// A symbolic link in the tree, to the file beside it.
-    const LINK: &str = "/slateos-open-rights/out";
+    /// A named pipe's node.
+    const FIFO: &str = "/slateos-open-rights/fifo";
+    /// The sealed fixture: a read-only memfs holding the trees.
+    const SEALED: &str = "/.open-rights-trees";
+    /// The tree, a file in it, and one in the tree nested in it.
+    const TREE: &str = "/.open-rights-trees/a";
+    const IN_TREE: &str = "/.open-rights-trees/a/f.txt";
+    const NESTED: &str = "/.open-rights-trees/a/sub";
+    const IN_NESTED: &str = "/.open-rights-trees/a/sub/g.txt";
+    /// Beside the tree, on its filesystem; and a link in the tree to it.
+    const BESIDE: &str = "/.open-rights-trees/beside.txt";
+    const LINK: &str = "/.open-rights-trees/a/out";
+    /// Another directory, a tree of its own.
+    const OTHER: &str = "/.open-rights-trees/other";
 
     serial_println!("[spawn] Running open rights and FileTree (ring 3) test...");
     let mut skips = crate::fs::selftest::Skips::new();
@@ -4420,87 +4440,268 @@ pub fn self_test_open_rights() -> KernelResult<()> {
             Err(e)
         }),
         Vfs::write_file(FILE, CONTENT),
-        Vfs::write_file(BESIDE, CONTENT),
+        Vfs::write_file(EMPTIED, CONTENT),
     );
     if !ready {
         skips.report("[spawn]");
         return Ok(());
     }
-    // Ignored on purpose: a leftover link from an earlier boot is made
-    // again below, and none is no matter; a leftover of the name a refused
-    // create must not make would read as its making.
-    let _ = Vfs::remove(LINK);
+    // Ignored on purpose: none is no matter, and a leftover of the name a
+    // refused create must not make, or of the pipe made below, would read
+    // as its making or refuse it.
     let _ = Vfs::remove(NEW);
-    // A filesystem without symbolic links leaves that one case out, said
-    // below.
-    let linked = Vfs::symlink(LINK, BESIDE).is_ok();
-    let tree = crate::fs::trees::register(crate::fs::path::Path::new(DIR))?;
-    let other =
-        crate::fs::trees::register(crate::fs::path::Path::new("/slateos-open-rights-other"))?;
+    let _ = Vfs::remove(MADE);
+    let _ = Vfs::remove(FIFO);
+    let mut failed = 0u32;
+    let mut fail = |what: core::fmt::Arguments<'_>| {
+        serial_println!("[spawn]   FAIL: open rights: {what}");
+        failed = failed.saturating_add(1);
+    };
+    if let Err(e) = Vfs::mknod_fifo(FIFO, 0o644) {
+        fail(format_args!(
+            "the named pipe {FIFO} could not be made: {e:?}"
+        ));
+    }
+
+    // The sealed fixture, sealed as a placed firmware directory is; a
+    // filesystem without symbolic links leaves that one case out, said.
+    crate::fs::memfs::mount(SEALED)?;
+    let mut linked = false;
+    let sealed = (|| {
+        Vfs::mkdir_all(NESTED)?;
+        Vfs::mkdir(OTHER)?;
+        Vfs::write_file(IN_TREE, CONTENT)?;
+        Vfs::write_file(IN_NESTED, CONTENT)?;
+        Vfs::write_file(BESIDE, CONTENT)?;
+        linked = Vfs::symlink(LINK, BESIDE).is_ok();
+        let mut options = Vfs::mount_options(SEALED)?;
+        options.read_only = true;
+        Vfs::remount(SEALED, options)?;
+        let path = crate::fs::path::Path::new;
+        Ok::<_, KernelError>((
+            crate::fs::trees::register(path(TREE))?,
+            crate::fs::trees::register(path(NESTED))?,
+            crate::fs::trees::register(path(OTHER))?,
+        ))
+    })();
+    let (tree, nested, other) = match sealed {
+        Ok(ids) => ids,
+        Err(e) => {
+            // Ignored on purpose: the fixture's error is the answer.
+            let _ = Vfs::unmount(SEALED);
+            serial_println!(
+                "[spawn]   FAIL: open rights: the sealed trees could not be made: {e:?}"
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
 
     let read_only = [(ResourceType::File, 0u64, Rights::READ)];
     let read_write = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
-    let tree_only = [(ResourceType::FileTree, tree, Rights::READ)];
-    let other_tree = [(ResourceType::FileTree, other, Rights::READ)];
+    let in_tree = [(ResourceType::FileTree, tree, Rights::READ)];
+    let in_nested = [(ResourceType::FileTree, nested, Rights::READ)];
+    let in_both = [
+        (ResourceType::FileTree, nested, Rights::READ),
+        (ResourceType::FileTree, tree, Rights::READ),
+    ];
+    let in_other = [(ResourceType::FileTree, other, Rights::READ)];
     let read = F::READ.bits();
+    let read_create = F::READ.bits() | F::CREATE.bits();
     let truncate = F::READ.bits() | F::WRITE.bits() | F::TRUNCATE.bits();
     let create = F::READ.bits() | F::WRITE.bits() | F::CREATE.bits();
+    // Syscall numbers, all below 2^32.
+    #[allow(clippy::cast_possible_truncation)]
+    let (fs_open, fifo_open) = (
+        crate::syscall::number::SYS_FS_OPEN as u32,
+        crate::syscall::number::SYS_FIFO_OPEN as u32,
+    );
 
-    // (what, caps, path, flags, the probe's exit: 0 opened, 1 PermissionDenied)
-    /// What a case is: what it shows, the probe's capabilities, the path
-    /// it opens, its flags, and the exit it must give.
+    /// A case: what it shows, the probe's capabilities, its call, the path
+    /// it opens, its flags, and the exit it must give -- 0 opened, 1
+    /// PermissionDenied, 2 another refusal.
     type Case<'a> = (
         &'a str,
         &'a [(ResourceType, u64, Rights)],
+        u32,
         &'a str,
         u32,
         i32,
     );
     let mut cases: alloc::vec::Vec<Case<'_>> = alloc::vec![
-        ("READ opens to read", &read_only, FILE, read, 0),
+        ("READ opens to read", &read_only, fs_open, FILE, read, 0),
+        (
+            "READ opens O_RDONLY|O_CREAT of a file that exists",
+            &read_only,
+            fs_open,
+            FILE,
+            read_create,
+            0
+        ),
         (
             "READ alone does not truncate",
             &read_only,
-            FILE,
-            truncate,
-            1
-        ),
-        ("READ alone does not create", &read_only, NEW, create, 1),
-        ("READ and WRITE truncate", &read_write, BESIDE, truncate, 0),
-        ("READ and WRITE create", &read_write, MADE, create, 0),
-        ("a tree opens to read beneath it", &tree_only, FILE, read, 0),
-        (
-            "a tree does not truncate beneath it",
-            &tree_only,
+            fs_open,
             FILE,
             truncate,
             1
         ),
         (
-            "a tree does not create beneath it",
-            &tree_only,
+            "READ alone does not create",
+            &read_only,
+            fs_open,
             NEW,
             create,
             1
         ),
         (
+            "READ and WRITE truncate",
+            &read_write,
+            fs_open,
+            EMPTIED,
+            truncate,
+            0
+        ),
+        (
+            "READ and WRITE create",
+            &read_write,
+            fs_open,
+            MADE,
+            create,
+            0
+        ),
+        (
+            "READ opens a named pipe's read end",
+            &read_only,
+            fifo_open,
+            FIFO,
+            read,
+            0
+        ),
+        (
+            "READ alone does not open its write end",
+            &read_only,
+            fifo_open,
+            FIFO,
+            F::WRITE.bits(),
+            1
+        ),
+        (
+            "READ and WRITE reach its write end, which has no reader",
+            &read_write,
+            fifo_open,
+            FIFO,
+            F::WRITE.bits(),
+            2
+        ),
+        (
+            "a tree opens to read beneath it",
+            &in_tree,
+            fs_open,
+            IN_TREE,
+            read,
+            0
+        ),
+        (
+            "a tree opens a path with . in it",
+            &in_tree,
+            fs_open,
+            "/.open-rights-trees/a/./f.txt",
+            read,
+            0
+        ),
+        (
+            "a tree opens O_RDONLY|O_CREAT of a file that exists",
+            &in_tree,
+            fs_open,
+            IN_TREE,
+            read_create,
+            0
+        ),
+        (
+            "a tree opens beneath the tree nested in it",
+            &in_tree,
+            fs_open,
+            IN_NESTED,
+            read,
+            0
+        ),
+        (
+            "a tree does not truncate beneath it",
+            &in_tree,
+            fs_open,
+            IN_TREE,
+            truncate,
+            1
+        ),
+        (
+            "a tree does not create beneath it",
+            &in_tree,
+            fs_open,
+            "/.open-rights-trees/a/new",
+            create,
+            1
+        ),
+        (
             "a tree does not read beside it",
-            &tree_only,
+            &in_tree,
+            fs_open,
             BESIDE,
             read,
             1
         ),
         (
             "a tree does not read out of it by ..",
-            &tree_only,
-            "/slateos-open-rights/../slateos-open-rights2.txt",
+            &in_tree,
+            fs_open,
+            "/.open-rights-trees/a/../beside.txt",
             read,
             1
         ),
         (
-            "a tree for another directory reads nothing here",
-            &other_tree,
+            "a tree does not read a writable filesystem's file",
+            &in_tree,
+            fs_open,
             FILE,
+            read,
+            1
+        ),
+        (
+            "a nested tree opens beneath itself",
+            &in_nested,
+            fs_open,
+            IN_NESTED,
+            read,
+            0
+        ),
+        (
+            "a nested tree does not read its parent's",
+            &in_nested,
+            fs_open,
+            IN_TREE,
+            read,
+            1
+        ),
+        (
+            "a nested tree does not read its parent's by ..",
+            &in_nested,
+            fs_open,
+            "/.open-rights-trees/a/sub/../f.txt",
+            read,
+            1
+        ),
+        (
+            "of two nested trees, what the nearer refuses opens through the other",
+            &in_both,
+            fs_open,
+            "/.open-rights-trees/a/sub/../f.txt",
+            read,
+            0
+        ),
+        (
+            "a tree for another directory reads nothing here",
+            &in_other,
+            fs_open,
+            IN_TREE,
             read,
             1
         ),
@@ -4508,7 +4709,8 @@ pub fn self_test_open_rights() -> KernelResult<()> {
     if linked {
         cases.push((
             "a tree does not read out of it by a symbolic link",
-            &tree_only,
+            &in_tree,
+            fs_open,
             LINK,
             read,
             1,
@@ -4520,11 +4722,8 @@ pub fn self_test_open_rights() -> KernelResult<()> {
         );
     }
 
-    let mut failed = 0u32;
-    for (what, caps, path, flags, want) in cases {
-        let mut path_nul = alloc::vec::Vec::from(path.as_bytes());
-        path_nul.push(0);
-        let elf = elf::build_open_probe_elf(&path_nul, path.len() as u32, flags);
+    /// `elf` run holding `caps`: its exit code, `None` for none within 5 s.
+    fn probe(elf: &[u8], caps: &[(ResourceType, u64, Rights)]) -> KernelResult<Option<i32>> {
         let options = SpawnOptions {
             name: "spawn-test-open-rights",
             parent: 0,
@@ -4537,57 +4736,99 @@ pub fn self_test_open_rights() -> KernelResult<()> {
             cwd: None,
             identity: None,
         };
-        let got = match spawn_process(&elf, &options) {
-            Ok(result) => {
-                let deadline = crate::hrtimer::now_ns().saturating_add(5_000_000_000);
-                while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-                    && crate::hrtimer::now_ns() < deadline
-                {
-                    crate::sched::sleep_ms(5);
-                }
-                let code = pcb::exit_code(result.pid);
-                teardown_fixture(result.pid, result.task_id);
-                code
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   FAIL: open rights: {what}: the probe was not spawned ({e:?})"
-                );
-                failed = failed.saturating_add(1);
-                continue;
-            }
-        };
-        if got != Some(want) {
-            serial_println!(
-                "[spawn]   FAIL: open rights: {what}: the probe of {path} exited {got:?}, not {want} \
-                 (0 opened, 1 PermissionDenied, 2 another refusal)"
-            );
-            failed = failed.saturating_add(1);
-        }
+        let result = spawn_process(elf, &options)?;
+        let deadline = crate::hrtimer::now_ns().saturating_add(5_000_000_000);
+        let ended = wait_for_fixture(result.pid, deadline, 5);
+        let code = pcb::exit_code(result.pid);
+        teardown_fixture(result.pid, result.task_id);
+        Ok(code.filter(|_| ended))
     }
+    let mut check = |what: &str, elf: &[u8], caps: &[(ResourceType, u64, Rights)], want: i32| {
+        match probe(elf, caps) {
+            Ok(Some(got)) if got == want => {}
+            got => fail(format_args!(
+                "{what}: the probe answered {got:?}, not {want} (0 opened, 1 refused for want of a right, 2 refused otherwise)"
+            )),
+        }
+    };
+    /// `path` NUL-terminated, for a probe to name.
+    fn nul(path: &str) -> alloc::vec::Vec<u8> {
+        let mut bytes = alloc::vec::Vec::from(path.as_bytes());
+        bytes.push(0);
+        bytes
+    }
+    /// The open probe of `path` with `call`, `flags` and `arg3`.
+    fn open_probe(call: u32, path: &str, flags: u32, arg3: u32) -> alloc::vec::Vec<u8> {
+        // A path a few dozen bytes long.
+        #[allow(clippy::cast_possible_truncation)]
+        let len = path.len() as u32;
+        elf::build_open_probe_elf(call, &nul(path), len, flags, arg3)
+    }
+    // Each a pipe's end opened without waiting for the other (arg3 1).
+    for (what, caps, call, path, flags, want) in cases {
+        check(what, &open_probe(call, path, flags, 1), caps, want);
+    }
+    // The pipe reopened for writing through /proc/self/fd, from its read
+    // end: the File rights an open for writing asks.
+    let reopen = elf::build_linux_fifo_reopen_probe_elf(&nul(FIFO));
+    check(
+        "READ alone does not reopen a pipe's read end for writing",
+        &reopen,
+        &read_only,
+        1,
+    );
+    check(
+        "READ and WRITE reopen a pipe's read end for writing",
+        &reopen,
+        &read_write,
+        0,
+    );
+
+    // Another filesystem mounted over the tree's directory, with a file of
+    // the same name: there for the File capability, no longer the tree's.
+    let over = crate::fs::memfs::mount(TREE).and_then(|()| Vfs::write_file(IN_TREE, b"over"));
+    match over {
+        Ok(()) => {
+            let opens = open_probe(fs_open, IN_TREE, read, 0);
+            check(
+                "a tree reads nothing once another filesystem is mounted over it",
+                &opens,
+                &in_tree,
+                1,
+            );
+            check(
+                "a File capability reads what was mounted over the tree",
+                &opens,
+                &read_only,
+                0,
+            );
+        }
+        Err(e) => fail(format_args!(
+            "a filesystem could not be mounted over {TREE}: {e:?}"
+        )),
+    }
+
     // What the refusals left: the file whole, and nothing made.
     if Vfs::read_file(FILE).ok().as_deref() != Some(CONTENT) {
-        serial_println!("[spawn]   FAIL: open rights: a refused truncation changed {FILE}");
-        failed = failed.saturating_add(1);
+        fail(format_args!("a refused truncation changed {FILE}"));
     }
     if Vfs::metadata(NEW).is_ok() {
-        serial_println!("[spawn]   FAIL: open rights: a refused create made {NEW}");
-        failed = failed.saturating_add(1);
+        fail(format_args!("a refused create made {NEW}"));
     }
     // Ignored on purpose: the fixture's leftovers harm nothing, and a
     // failure here says nothing about the rights tested.
-    let _ = Vfs::remove(LINK);
-    let _ = Vfs::remove(NEW);
-    let _ = Vfs::remove(MADE);
-    let _ = Vfs::remove(FILE);
+    let _ = Vfs::unmount(TREE);
+    let _ = Vfs::unmount(SEALED);
+    for leftover in [NEW, MADE, FIFO, FILE, EMPTIED] {
+        let _ = Vfs::remove(leftover);
+    }
     let _ = Vfs::rmdir(DIR);
-    let _ = Vfs::remove(BESIDE);
     skips.report("[spawn]");
     if failed > 0 {
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[spawn]   open rights: READ alone neither truncates nor creates, and a FileTree reads beneath its directory and nowhere else -- not beside it, not out by .. or a link -- and nothing more: OK"
+        "[spawn]   open rights: READ alone reads -- O_CREAT of a file there too -- and neither truncates, creates nor opens a pipe to write, natively or by /proc/self/fd; a FileTree reads beneath its sealed directory and nowhere else -- not beside it, not out by .. or a link, not its parent's from a nested one, not once a filesystem is mounted over it: OK"
     );
     Ok(())
 }
@@ -5281,7 +5522,7 @@ pub fn self_test_userspace_netstack() -> KernelResult<()> {
 /// proves the IPC round-trip; an `ST_OK` reply additionally proves the whole
 /// userspace DNS path.  Skips gracefully when there is no network.
 pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
-    use crate::ipc::{channel, service};
+    use crate::ipc::service;
 
     // The request/reply schema is shared with the daemon via the `netipc` crate.
 

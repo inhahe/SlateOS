@@ -90,11 +90,26 @@ struct Program<'a> {
     poll_ms: u64,
 }
 
+/// The user and group a Linux driver process runs as ([`start`]): not
+/// root, so that it may do nothing uid 0 alone may -- mount over the
+/// directories its firmware trees name (`fs::trees`), reconfigure an
+/// interface, set the clock -- and has only the capabilities it is given.
+/// Reserved for it in the rootfs's `/etc/passwd`
+/// (`requests/a-d-reserve-uid-65533-for-linux-driver-processes.md`).
+pub const DRIVER_UID: u32 = 65_533;
+/// [`DRIVER_UID`]'s group.
+pub const DRIVER_GID: u32 = 65_533;
+
 /// `program` started with `argv`, holding `capabilities` -- and, a driver
-/// process once the boot medium's firmware is placed
+/// process, as [`DRIVER_UID`], and once the boot medium's firmware is placed
 /// ([`BOOT_FIRMWARE_PLACED`]), told where
 /// (`firmware_class.path=`[`BOOT_FIRMWARE_DIR`]), unless `argv` names a
 /// directory of its own.
+///
+/// # Errors
+///
+/// The spawn's; `InternalError`, said, for a driver process that is root
+/// all the same.
 fn start(
     program: &Program<'_>,
     argv: &[&[u8]],
@@ -121,9 +136,23 @@ fn start(
         envp: &[],
         exe_path: None,
         cwd: None,
-        identity: None,
+        identity: program.driver.then_some(spawn::SpawnIdentity {
+            uid: DRIVER_UID,
+            gid: DRIVER_GID,
+            groups: &[],
+        }),
     };
-    spawn::spawn_process(program.elf, &options)
+    let process = spawn::spawn_process(program.elf, &options)?;
+    if program.driver && pcb::get_credentials(process.pid).is_none_or(|c| c.any_root_uid()) {
+        serial_println!(
+            "[linuxdrv]   FAIL: the driver process {} (pid {}) runs as root",
+            program.name,
+            process.pid
+        );
+        spawn::teardown_fixture(process.pid, process.task_id);
+        return Err(KernelError::InternalError);
+    }
+    Ok(process)
 }
 
 /// How `process`, started from `program`, ended within `program`'s limit
@@ -479,16 +508,12 @@ fn wifi_runs(
         return Ok(Some(false));
     };
     let a = card.address;
-    let [boot_fw, system_fw] = firmware_reading()?;
-    let caps = [
-        (
-            ResourceType::PciDevice,
-            crate::cap::pci_device_id(a.bus, a.device, a.function),
-            Rights::WRITE,
-        ),
-        boot_fw,
-        system_fw,
-    ];
+    let mut caps = alloc::vec![(
+        ResourceType::PciDevice,
+        crate::cap::pci_device_id(a.bus, a.device, a.function),
+        Rights::WRITE,
+    )];
+    caps.extend(firmware_reading()?);
     let arg = alloc::format!("pci={:02x}:{:02x}.{:x}", a.bus, a.device, a.function);
     // The card's firmware loaded -- from the boot medium's, which start()
     // names -- then up to 30 s for it to register and 30 s for the scan
@@ -562,21 +587,41 @@ pub const BOOT_FIRMWARE_DIR: &str = "/.boot-firmware";
 /// searches after [`BOOT_FIRMWARE_DIR`].
 const SYSTEM_FIRMWARE_DIR: &str = "/lib/firmware";
 
-/// The right a driver process reads its firmware with: to read beneath the
+/// The rights a driver process reads its firmware with: to read beneath the
 /// boot medium's firmware and the system's, and nothing else
 /// (`ResourceType::FileTree`, design-decisions 1595) -- never the File
 /// capability, which is every file
-/// (known-issues A-LINUX-DRIVER-PROCESS-READS-FILES-UNCONFINED).
+/// (known-issues A-LINUX-DRIVER-PROCESS-READS-FILES-UNCONFINED). Each only
+/// where it can be a tree: the boot medium's once placed
+/// ([`BOOT_FIRMWARE_PLACED`]), the system's where it is a directory on a
+/// read-only filesystem -- which an installed system's `/lib/firmware`, on
+/// its writable root, is not, said once
+/// (known-issues A-AN-INSTALLED-SYSTEMS-FIRMWARE-IS-NO-TREE).
 ///
 /// # Errors
 ///
-/// The tree registry's (`fs::trees::register`): full.
-fn firmware_reading() -> KernelResult<[(ResourceType, u64, Rights); 2]> {
-    let tree = |dir: &str| {
-        crate::fs::trees::register(crate::fs::path::Path::new(dir))
-            .map(|id| (ResourceType::FileTree, id, Rights::READ))
-    };
-    Ok([tree(BOOT_FIRMWARE_DIR)?, tree(SYSTEM_FIRMWARE_DIR)?])
+/// The tree registry's (`fs::trees::register`) other than for no such
+/// directory: full, say.
+fn firmware_reading() -> KernelResult<alloc::vec::Vec<(ResourceType, u64, Rights)>> {
+    static SAID: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    let mut trees = alloc::vec::Vec::new();
+    if BOOT_FIRMWARE_PLACED.load(core::sync::atomic::Ordering::Acquire) {
+        let id = crate::fs::trees::register(crate::fs::path::Path::new(BOOT_FIRMWARE_DIR))?;
+        trees.push((ResourceType::FileTree, id, Rights::READ));
+    }
+    match crate::fs::trees::register(crate::fs::path::Path::new(SYSTEM_FIRMWARE_DIR)) {
+        Ok(id) => trees.push((ResourceType::FileTree, id, Rights::READ)),
+        Err(KernelError::NotFound | KernelError::NotADirectory) => {}
+        Err(e @ (KernelError::PermissionDenied | KernelError::NotSupported)) => {
+            if !SAID.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                serial_println!(
+                    "[linuxdrv] {SYSTEM_FIRMWARE_DIR} is not on a read-only filesystem with an identity ({e:?}): no driver process reads firmware there"
+                );
+            }
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(trees)
 }
 
 /// Whether [`mount_boot_firmware`] placed the boot medium's firmware, whole
@@ -996,19 +1041,35 @@ fn boot_firmware_run(
         "failed its firmware initcall, given no capability to read the boot medium's firmware",
         || None,
     )?;
-    // A tree is that directory alone: holding one for another, the boot
-    // medium's firmware is as unreadable as with none.
-    let elsewhere = crate::fs::trees::register(crate::fs::path::Path::new(FIRMWARE_DIR))?;
-    expect(
-        hello,
-        &argv,
-        &[(ResourceType::FileTree, elsewhere, Rights::READ)],
-        EXIT_INIT_FAILED,
-        "failed its firmware initcall, holding only the right to read beneath another directory",
-        || None,
-    )?;
+    // A tree is that directory alone: holding one for another -- sealed
+    // read-only as a tree's must be, and holding a file of the same name --
+    // the boot medium's firmware is as unreadable as with none.
+    place_firmware(&[(b"slateos/hello.fw", b"elsewhere")], ELSEWHERE_DIR)?;
+    let ran = crate::fs::trees::register(crate::fs::path::Path::new(ELSEWHERE_DIR)).and_then(
+        |elsewhere| {
+            expect(
+                hello,
+                &argv,
+                &[(ResourceType::FileTree, elsewhere, Rights::READ)],
+                EXIT_INIT_FAILED,
+                "failed its firmware initcall, holding only the right to read beneath another directory",
+                || None,
+            )
+        },
+    );
+    // The fixture's own; one left mounted is said, and the run's verdict
+    // stands either way.
+    if let Err(e) = Vfs::unmount(ELSEWHERE_DIR) {
+        serial_println!("[linuxdrv] the fixture at {ELSEWHERE_DIR} stays mounted: {e:?}");
+    }
+    ran?;
     Ok(true)
 }
+
+/// Where [`boot_firmware_run`] puts a sealed directory of firmware other
+/// than the boot medium's, for a tree naming it to read none of the boot
+/// medium's.
+const ELSEWHERE_DIR: &str = "/.linuxdrv-elsewhere";
 
 /// Where [`firmware_runs`] puts the hello process's firmware.
 const FIRMWARE_DIR: &str = "/tmp/linuxdrv-fw";

@@ -9126,8 +9126,10 @@ extern "C" fn kernel_main() -> ! {
                 }
             }
             // The WiFi network file is dropped as soon as its reader has read
-            // it; dropped again here, in case, before any other process can
-            // run (design-decisions 1596).
+            // it, in the Linuxdrv self-test's join; dropped again here, in
+            // case, before init starts. The driver and network daemon
+            // started just above already run: the drop after the join is the
+            // one that keeps the file from them (design-decisions 1596).
             linuxdrv::drop_boot_wifi();
 
             // Arm the container healthcheck supervisor. Deferred to here — after every

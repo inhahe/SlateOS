@@ -35,13 +35,21 @@ printed in a log.
    mount the moment the joining process has served the card, or ended, or
    run out of time (`linuxdrv::drop_boot_wifi`) -- and again, in case,
    before init -- so that no other process can read it, root's included,
-   by any path, bind mount or syscall. A driver started for the system's
+   by any path, bind mount or syscall. While it is placed, a process
+   holding the general `File` capability could read it too, through the
+   root namespace; none runs then, since the joining driver is the only
+   process the boot has started at that point, the long-lived ones
+   starting after the self-tests (known-issues
+   A-THE-WIFI-FILE-IS-IN-THE-ROOT-NAMESPACE-WHILE-PLACED, for a join made
+   beside other processes). A driver started for the system's
    life that must join again later will need the PMK kept for it
    (known-issues A-WIFI-REKEYS-AND-LOST-LINKS-ARE-NOT-ANSWERED).
 5. **Nor is it left in memory once read** (added after the second review,
    which found both of the kernel's copies kept: the boot module's for the
    system's life, the sealed filesystem's freed as it was). The sealed
-   filesystem zeroes its files as it goes (`memfs::mount_wiped`), and the
+   filesystem is written before it is mounted, read-only as a whole from
+   the start, and zeroes its files as it goes (`memfs::mount_sealed`), and
+   the
    drop zeroes the boot module's bytes where the bootloader loaded them
    (`boot::wipe_modules`), after which there is nothing to place again.
    The driver process wipes what it read as soon as it has parsed it,

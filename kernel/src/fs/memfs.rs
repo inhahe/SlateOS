@@ -928,15 +928,26 @@ pub struct MemFs {
     /// How many objects it may hold: tmpfs's `nr_inodes=`.
     inode_limit: MemFsLimit,
     /// Whether every file's contents are zeroed as the filesystem is
-    /// dropped ([`mount_wiped`]): for one holding a secret, which the memory
-    /// it leaves to the allocator must not keep.
+    /// dropped ([`mount_sealed`]): for one holding a secret, which the
+    /// memory it leaves to the allocator must not keep.
     wipe_on_drop: bool,
+}
+
+/// How many filesystems that wipe their contents ([`MemFs::wipe_on_drop`])
+/// have been dropped, and wiped: what a check that one was compares.
+static WIPED_ON_DROP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// How many filesystems that wipe their contents have been dropped and
+/// wiped since boot ([`mount_sealed`]'s `wipe`).
+pub fn wiped_on_drop() -> u64 {
+    WIPED_ON_DROP.load(core::sync::atomic::Ordering::Acquire)
 }
 
 impl Drop for MemFs {
     fn drop(&mut self) {
         if self.wipe_on_drop {
             self.wipe_contents();
+            WIPED_ON_DROP.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         }
     }
 }
@@ -973,38 +984,57 @@ impl MemFs {
 
     /// Every file's contents zeroed where they lie, its length kept: its
     /// bytes, or each frame it holds -- which the page cache and any mapping
-    /// of the file then read as zeros too. By volatile writes, which the
-    /// compiler may not drop as dead stores to memory about to be freed.
+    /// of the file then read as zeros too ([`crate::crypto::wipe`]).
     fn wipe_contents(&mut self) {
         for node in self.inodes.values_mut() {
             match &mut node.kind {
-                MemFsNodeKind::File(MemData::Bytes(bytes)) => {
-                    for byte in bytes.iter_mut() {
-                        // SAFETY: `byte` is a live, aligned, exclusive reference.
-                        unsafe { core::ptr::write_volatile(byte, 0) };
-                    }
-                }
+                MemFsNodeKind::File(MemData::Bytes(bytes)) => crate::crypto::wipe(bytes),
                 MemFsNodeKind::File(MemData::Frames(frames)) => {
                     for &held in frames.pages.values() {
                         // A frame not reachable has nothing of the file's in
                         // the direct map to wipe; the HHDM is always there
                         // once memfs runs.
                         let Ok(at) = frame_bytes(held) else { continue };
-                        for i in 0..FRAME_SIZE {
-                            // SAFETY: `held` is a frame of this file, which
-                            // holds a reference on it, so it is live and not
-                            // reused; `at` is its FRAME_SIZE bytes in the
-                            // direct map, `i` within them. Others reading it
-                            // (the cache, a mapping) read memory a write may
-                            // change at any time, as they always do.
-                            unsafe { core::ptr::write_volatile(at.add(i), 0) };
-                        }
+                        // SAFETY: `held` is a frame of this file, which holds
+                        // a reference on it, so it is live and not reused;
+                        // `at` is its FRAME_SIZE bytes in the direct map, and
+                        // no slice of them is held here. Others reading it
+                        // (the cache, a mapping) read memory a write may
+                        // change at any time, as they always do.
+                        unsafe { crate::crypto::wipe_raw(at, FRAME_SIZE) };
                     }
                 }
                 _ => {}
             }
         }
-        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// A memfs holding `files` -- each `(path, bytes)`, absolute, its
+    /// directories made as it needs them -- and nothing else, written now,
+    /// before anything can reach it ([`mount_sealed`]). `wipe`: every
+    /// file's contents zeroed when it is dropped ([`Self::wipe_contents`]).
+    ///
+    /// # Errors
+    ///
+    /// What a directory or a write refuses -- a file named as another's
+    /// directory, say. The filesystem is dropped with what it held, wiped if
+    /// `wipe`.
+    fn holding(files: &[(&Path, &[u8])], wipe: bool) -> KernelResult<Self> {
+        let mut fs = Self::new();
+        fs.wipe_on_drop = wipe;
+        for &(path, data) in files {
+            let mut dir = PathBuf::from("/");
+            let parts: Vec<_> = path.components().collect();
+            for part in parts.iter().take(parts.len().saturating_sub(1)) {
+                dir.push(part);
+                match fs.mkdir(&dir) {
+                    Ok(()) | Err(KernelError::AlreadyExists) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            fs.write_file(path, data)?;
+        }
+        Ok(fs)
     }
 
     /// A new memfs as a tmpfs mount's options ask: `data` is the
@@ -2504,27 +2534,49 @@ pub fn mount<P: AsRef<crate::fs::path::Path> + ?Sized>(mount_path: &P) -> Kernel
     Ok(())
 }
 
-/// [`mount`], of a filesystem whose files' contents are zeroed when it is
-/// dropped -- once it is unmounted and nothing holds it -- rather than left
-/// to the allocator as they were: for one holding a secret (the boot
-/// medium's WiFi network file, design-decisions 1596).
+/// A memfs holding `files` -- each `(path, bytes)`, absolute, as
+/// [`MemFs::holding`] takes them -- mounted at `mount_path` read-only as a
+/// whole from the start (the boot medium's firmware, its WiFi network
+/// file): written once, before any process can reach them, and never
+/// changed. `wipe`: their contents zeroed when the filesystem is dropped,
+/// once it is unmounted and nothing holds it -- which is then all they ever
+/// were, since a file written once and never changed has freed none
+/// before.
 ///
 /// # Errors
-/// [`mount`]'s.
-pub fn mount_wiped<P: AsRef<crate::fs::path::Path> + ?Sized>(mount_path: &P) -> KernelResult<()> {
-    let mut fs = MemFs::new();
-    fs.wipe_on_drop = true;
-    crate::fs::Vfs::mount(mount_path, Box::new(fs))?;
-    Ok(())
+///
+/// [`MemFs::holding`]'s, or the mount's ([`crate::fs::Vfs::mount`]):
+/// nothing is mounted then.
+pub fn mount_sealed(mount_path: &Path, files: &[(&Path, &[u8])], wipe: bool) -> KernelResult<()> {
+    let fs = MemFs::holding(files, wipe)?;
+    let mut options = crate::fs::vfs::MountOptions::defaults();
+    options.read_only = true;
+    crate::fs::Vfs::mount_with_options(mount_path, Box::new(fs), options)
 }
 
-/// [`MemFs::wipe_contents`], which a filesystem of [`mount_wiped`] runs as
-/// it is dropped: a file of bytes and one of frames (past [`BYTES_MAX`]),
-/// read back as zeros of the length each had.
+/// [`MemFs::wipe_contents`], which a filesystem that wipes runs as it is
+/// dropped: a file of bytes and one of frames (past [`BYTES_MAX`]), read
+/// back as zeros of the length each had; and the drop -- a filesystem made
+/// to wipe counted wiped as it goes ([`wiped_on_drop`]), one not made to
+/// not.
 ///
 /// # Errors
-/// `IoError`, said, when either holds anything but zeros after.
+/// `IoError`, said, when anything is not so.
 fn wipe_self_test() -> KernelResult<()> {
+    let before = wiped_on_drop();
+    let secret: &[u8] = b"a secret";
+    drop(MemFs::holding(&[(Path::new("/a/secret"), secret)], true)?);
+    let after_wiping = wiped_on_drop();
+    drop(MemFs::holding(&[(Path::new("/a/plain"), secret)], false)?);
+    let after_plain = wiped_on_drop();
+    if after_wiping.wrapping_sub(before) != 1 || after_plain != after_wiping {
+        crate::serial_println!(
+            "[memfs]   FAILED: a filesystem made to wipe counted {} wiped as it dropped, one not made to {}",
+            after_wiping.wrapping_sub(before),
+            after_plain.wrapping_sub(after_wiping)
+        );
+        return Err(KernelError::IoError);
+    }
     let mut fs = MemFs::new();
     let small = alloc::vec![0x5Au8; 100];
     let large_len = usize::try_from(BYTES_MAX).map_err(|_| KernelError::InternalError)?;

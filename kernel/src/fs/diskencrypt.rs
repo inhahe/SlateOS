@@ -40,6 +40,7 @@
 //! layer's to read and write -- and the progress of an in-place encryption is
 //! whatever its caller reports through [`update_progress`].
 
+use crate::crypto::wipe;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex as Mutex;
@@ -208,15 +209,6 @@ impl<const N: usize> Drop for Secret<N> {
     fn drop(&mut self) {
         wipe(&mut self.0);
     }
-}
-
-/// Overwrite `bytes` with zeros in a way the compiler may not drop as dead.
-fn wipe(bytes: &mut [u8]) {
-    for b in bytes.iter_mut() {
-        // SAFETY: `b` is a valid, aligned, exclusive reference to one byte.
-        unsafe { core::ptr::write_volatile(b, 0) };
-    }
-    core::sync::atomic::compiler_fence(Ordering::SeqCst);
 }
 
 /// A key slot with what it opens with.

@@ -6,6 +6,8 @@
 //! - **CRC32C** (Castagnoli) for ext4 metadata checksums, and **CRC-32**
 //! - **HMAC-SHA256** (RFC 2104) and **ChaCha20** (RFC 8439), for the kernel
 //!   shell's file encryption (`fs::encrypt`)
+//! - **Wiping** a secret's memory before it is given back ([`wipe`],
+//!   [`wipe_raw`]), which every holder of one uses
 //!
 //! The rest of what this module once held -- HKDF, Poly1305, the
 //! ChaCha20-Poly1305 AEAD, X25519, SHA-512 and Ed25519 -- served the
@@ -22,6 +24,35 @@
 //! - ChaCha20: RFC 8439 (formerly RFC 7539)
 
 use alloc::vec::Vec;
+
+// ---------------------------------------------------------------------------
+// Wiping secrets
+// ---------------------------------------------------------------------------
+
+/// `bytes` overwritten with zeros by volatile writes, which the compiler may
+/// not drop as dead stores to memory about to be freed: a secret wiped
+/// before its memory is given back.
+pub fn wipe(bytes: &mut [u8]) {
+    let len = bytes.len();
+    // SAFETY: `bytes` is `len` bytes, valid for writes, that this call holds
+    // exclusively.
+    unsafe { wipe_raw(bytes.as_mut_ptr(), len) };
+}
+
+/// [`wipe`], of the `len` bytes at `at`: for memory no slice may name while
+/// it is written (a boot module, a frame through the direct map).
+///
+/// # Safety
+///
+/// `at..at + len` must be valid for writes, and no reference to those bytes
+/// may be used across the call.
+pub unsafe fn wipe_raw(at: *mut u8, len: usize) {
+    for i in 0..len {
+        // SAFETY: `i < len`: within the range the caller vouches for.
+        unsafe { core::ptr::write_volatile(at.add(i), 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
 
 // ---------------------------------------------------------------------------
 // SHA-256 -- re-exported from the shared `sha2` crate

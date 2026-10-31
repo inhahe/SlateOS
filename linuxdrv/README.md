@@ -221,7 +221,9 @@ answering the access point's key management for the life of the
 association -- a lost message 4, a pairwise rekey, the group key's renewal;
 a message 1 never displaces the keys in force, only a message 3 signed with
 the keys it derived (a temporary PTK, 802.11-2020 12.7.6.1), so that a
-forged one cannot cut the link.
+forged one changes nothing in force -- though one sent in the middle of a
+handshake still spoils that handshake, as it does wpa_supplicant's, since
+802.11 gives message 1 no MIC.
 With "serve=" as well, the joined interface is served to the network stack
 once the join is done (`lx_nic_await_link_layer`). On the test PC the
 kernel's self-test joins the operator's network this way and has the

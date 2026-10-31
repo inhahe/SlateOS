@@ -1249,8 +1249,9 @@ struct lx_wifi_sta_keys {
  * last sent and of the first message 1 of the handshake under way
  * (`first_replay`), the last message it sent, whether its station's keys
  * are installed and its port open (`done`; `installed`, kept across a
- * message 3 sent again), and whether its station answered the group key it
- * last sent.
+ * message 3 sent again), whether its station answered the group key it
+ * last sent, and whether it answered a message 1 the access point did not
+ * send (`forged_answered`, lx_wifi_kept_check).
  */
 struct lx_wifi_ap_keys {
 	u8 pmk[LX_WPA_PMK_LEN];
@@ -1263,6 +1264,7 @@ struct lx_wifi_ap_keys {
 	bool done;
 	bool installed;
 	bool group_answered;
+	bool forged_answered;
 };
 
 /* The handshake under way: the access point's join, the station, and the two sides. */
@@ -1761,6 +1763,8 @@ static void lx_wifi_keep(struct work_struct *work)
 				   err);
 		kfree_skb(skb);
 	}
+	/* Whoever waits on what it counts (lx_wifi_kept_count) looks again. */
+	wake_up(st->eapol.wq);
 }
 
 /* A station on `dev`, its handshake's frames taken from now on; NULL for no memory. */
@@ -1786,9 +1790,10 @@ static struct lx_wifi_station *lx_wifi_station_new(const struct genl_family *nl8
 
 /*
  * Its first handshake made: its keeper answers the frames that come from
- * now on, and any come already. Kept so for the life of the process: the
- * station is never freed once kept, its keeper reaching it through the
- * work the frames it takes queue.
+ * now on, and any come already. A joined station is kept so for the life
+ * of the process, its keeper reaching it through the work the frames it
+ * takes queue; only the hwsim check's is freed, by lx_wifi_station_free,
+ * which waits for its keeper's last run first.
  */
 static void lx_wifi_station_keep(struct lx_wifi_station *st)
 {
@@ -1826,19 +1831,60 @@ static int lx_wifi_cross_watched(struct net_device *a, struct net_device *b, boo
 
 /*
  * One of the station's counts (struct lx_wifi_sta_keys) once its keeper --
- * another task -- has reached `want`, or LX_WIFI_FRAME_MS has passed: the
- * access point has the station's answer before the station has finished
- * what it answers for (message 4 is sent before its keys go in), so what
- * the access point does next must wait for the station's count, not read
- * it at once.
+ * another task, which wakes `wq` as it finishes each run (lx_wifi_keep) --
+ * has reached `want`, or LX_WIFI_FRAME_MS has passed: the access point has
+ * the station's answer before the station has finished what it answers for
+ * (message 4 is sent before its keys go in), so what the access point does
+ * next must wait for the station's count, not read it at once.
  */
-static unsigned int lx_wifi_kept_count(const unsigned int *count, unsigned int want)
+static unsigned int lx_wifi_kept_count(wait_queue_head_t *wq, const unsigned int *count,
+				       unsigned int want)
 {
-	int waited;
-
-	for (waited = 0; READ_ONCE(*count) < want && waited < LX_WIFI_FRAME_MS; waited += 10)
-		msleep(10);
+	wait_event_timeout(*wq, READ_ONCE(*count) >= want, msecs_to_jiffies(LX_WIFI_FRAME_MS));
 	return READ_ONCE(*count);
+}
+
+/*
+ * A message 1 no access point sent, as anyone in range may send one -- it
+ * carries no MIC: a nonce of its own, under the replay counter after the
+ * access point's last, which the access point's next frame then passes.
+ */
+static int lx_wifi_ap_forged_message_1(struct lx_wifi_handshaking *h)
+{
+	struct lx_wifi_ap_keys *a = &h->authenticator;
+	u8 nonce[LX_WPA_NONCE_LEN];
+
+	get_random_bytes(nonce, sizeof(nonce));
+	a->replay++;
+	a->forged_answered = false;
+	return lx_wifi_eapol_send(h->ap->dev, h->ap->sta, LX_WPA_EAPOL_AP,
+				  LX_WPA_INFO_VERSION | LX_WPA_INFO_PAIRWISE | LX_WPA_INFO_ACK,
+				  a->replay, nonce, NULL, 0, NULL);
+}
+
+/*
+ * The station's answer to a message 1 the access point did not send: a
+ * message 2, taken and dropped, as an access point drops one for no
+ * handshake of its own. 0, or -EPROTO for a frame that is not one.
+ */
+static int lx_wifi_ap_forged_answer(struct lx_wifi_handshaking *h, struct sk_buff *skb)
+{
+	const struct lx_wpa_eapol_key *k;
+	u16 info;
+
+	if (skb_linearize(skb) || !(k = lx_wpa_key_parse(skb->data, skb->len, NULL))) {
+		netdev_err(h->ap->dev, "an answer to a forged message 1 that is not a key frame\n");
+		return -EPROTO;
+	}
+	info = be16_to_cpu(k->info);
+	if ((info & (LX_WPA_INFO_PAIRWISE | LX_WPA_INFO_MIC | LX_WPA_INFO_ACK)) !=
+	    (LX_WPA_INFO_PAIRWISE | LX_WPA_INFO_MIC)) {
+		netdev_err(h->ap->dev, "an answer to a forged message 1 that is not a message 2 (key information %#x)\n",
+			   info);
+		return -EPROTO;
+	}
+	h->authenticator.forged_answered = true;
+	return 0;
 }
 
 /*
@@ -1846,10 +1892,14 @@ static unsigned int lx_wifi_kept_count(const unsigned int *count, unsigned int w
  * it once their handshake is made: message 3 sent again -- as when message
  * 4 is lost on the air -- which the station must answer again; a new
  * four-way handshake, which renews the pairwise key, and then a frame
- * crossing each way, protected, under the keys both sides now hold; the
- * access point's group key renewed and sent (802.11-2020 12.7.7), which the
- * station must install and answer -- and then a broadcast frame, which it
- * must receive under the renewed group key. 0, or what was wrong, said.
+ * crossing each way, protected, under the keys both sides now hold; a
+ * message 1 the access point did not send, which the station answers but
+ * which must change nothing in force -- message 3 of the handshake that
+ * made the keys, sent again, still answered, and a frame still crossing
+ * each way under them; the access point's group key renewed and sent
+ * (802.11-2020 12.7.7), which the station must install and answer -- and
+ * then a broadcast frame, which it must receive under the renewed group
+ * key. 0, or what was wrong, said.
  */
 static int lx_wifi_kept_check(struct lx_wifi_station *st, struct lx_wifi_eapol *at_ap,
 			      wait_queue_head_t *wq)
@@ -1866,7 +1916,7 @@ static int lx_wifi_kept_check(struct lx_wifi_station *st, struct lx_wifi_eapol *
 	err = lx_wifi_ap_message_3(h);
 	if (!err)
 		err = lx_wifi_ap_take(h, at_ap, wq, &a->done, "message 4, answering message 3 sent again,");
-	if (!err && (n = lx_wifi_kept_count(&s->resent, 1)) != 1) {
+	if (!err && (n = lx_wifi_kept_count(wq, &s->resent, 1)) != 1) {
 		netdev_err(h->sta_dev, "message 3 sent again was answered %u time(s) again, not once\n",
 			   n);
 		err = -EPROTO;
@@ -1875,8 +1925,30 @@ static int lx_wifi_kept_check(struct lx_wifi_station *st, struct lx_wifi_eapol *
 		err = lx_wifi_ap_message_1(h);
 	if (!err)
 		err = lx_wifi_ap_take(h, at_ap, wq, &a->done, "the pairwise key's renewal");
-	if (!err && (n = lx_wifi_kept_count(&s->pairwise_rekeys, 1)) != 1) {
+	if (!err && (n = lx_wifi_kept_count(wq, &s->pairwise_rekeys, 1)) != 1) {
 		netdev_err(h->sta_dev, "the pairwise key was renewed %u time(s), not once\n", n);
+		err = -EPROTO;
+	}
+	if (!err)
+		err = lx_wifi_cross_watched(ap->dev, h->sta_dev, true);
+	if (!err)
+		err = lx_wifi_ap_forged_message_1(h);
+	if (!err)
+		err = lx_wifi_take(h, &at_ap->frames, wq, lx_wifi_ap_forged_answer,
+				   &a->forged_answered);
+	if (err == -ETIMEDOUT)
+		netdev_err(ap->dev, "the station did not answer a message 1 in %d s\n",
+			   LX_WIFI_HANDSHAKE_S);
+	if (!err) {
+		a->done = false;
+		err = lx_wifi_ap_message_3(h);
+	}
+	if (!err)
+		err = lx_wifi_ap_take(h, at_ap, wq, &a->done,
+				      "message 4, answering message 3 sent again after a forged message 1,");
+	if (!err && (n = lx_wifi_kept_count(wq, &s->resent, 2)) != 2) {
+		netdev_err(h->sta_dev, "after a forged message 1, message 3 sent again was answered %u time(s) in all, not twice\n",
+			   n);
 		err = -EPROTO;
 	}
 	if (!err)
@@ -1889,14 +1961,14 @@ static int lx_wifi_kept_check(struct lx_wifi_station *st, struct lx_wifi_eapol *
 		err = lx_wifi_ap_group_key(h);
 	if (!err)
 		err = lx_wifi_ap_take(h, at_ap, wq, &a->group_answered, "the renewed group key's answer");
-	if (!err && (n = lx_wifi_kept_count(&s->rekeys, 1)) != 1) {
+	if (!err && (n = lx_wifi_kept_count(wq, &s->rekeys, 1)) != 1) {
 		netdev_err(h->sta_dev, "the group key renewed was taken %u time(s), not once\n", n);
 		err = -EPROTO;
 	}
 	if (!err)
 		err = lx_wifi_cross_at(ap->dev, h->sta_dev, h->sta_dev->broadcast);
 	if (!err)
-		netdev_info(h->sta_dev, "after the handshake: message 3 sent again answered again; the pairwise key renewed, a frame crossing each way under it; the group key renewed, installed, answered, and a broadcast frame received under it\n");
+		netdev_info(h->sta_dev, "after the handshake: message 3 sent again answered again; the pairwise key renewed, a frame crossing each way under it; a forged message 1 answered and the keys in force kept; the group key renewed, installed, answered, and a broadcast frame received under it\n");
 	return err;
 }
 
@@ -2200,7 +2272,7 @@ static int lx_wifi_ccm_check(void)
 /*
  * "join=<path>": a real network joined, as wpa_supplicant joins one. The
  * file at <path> -- on the boot medium, which only this process may read
- * (the kernel's linuxdrv::wifi_reading) -- names it: an "ssid=" line, its
+ * (the kernel's linuxdrv::place_boot_wifi) -- names it: an "ssid=" line, its
  * name, and a "psk=" line, its WPA2 passphrase, which nothing here ever
  * says. The card scans; of the access points that answer to the name, the
  * strongest whose RSN element SlateOS can join (lx_wifi_rsn_why) is joined

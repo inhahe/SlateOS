@@ -232,15 +232,12 @@ pub unsafe fn wipe_modules(prefix: &[u8]) -> usize {
         if !held {
             continue;
         }
-        for i in 0..len {
-            // SAFETY: as above; and the direct map maps them writable (only
-            // NX is added to it, mm::protect::harden_hhdm_nx). No slice of
-            // them is in use (this function's contract).
-            unsafe { core::ptr::write_volatile(at.add(i), 0) };
-        }
+        // SAFETY: as above; and the direct map maps them writable (only NX
+        // is added to it, mm::protect::harden_hhdm_nx). No slice of them is
+        // in use (this function's contract).
+        unsafe { crate::crypto::wipe_raw(at, len) };
         wiped = wiped.saturating_add(1);
     }
-    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     wiped
 }
 

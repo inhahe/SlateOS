@@ -12,15 +12,15 @@ kernel memory; a kernel bug that leaked it, or a memory dump, could.
 **Where.** `kernel/src/fs/memfs.rs`: `FileSystem::read_at` and its kin
 return a fresh `Vec<u8>` of the bytes asked for, which the read syscall
 copies out to the process and drops. Other filesystems' reads do the same.
-The memfs's own copy is zeroed when a filesystem of `memfs::mount_wiped`
-is dropped, and the boot module's by `boot::wipe_modules`; the read path's
+The memfs's own copy is zeroed when a filesystem `memfs::mount_sealed`
+made to wipe is dropped, and the boot module's by `boot::wipe_modules`; the read path's
 copies are not.
 
 **The proper fix.** One of:
 - a read path that copies from the filesystem's storage straight into the
   process's buffer, with no heap copy between (also faster for large
   reads); or
-- a filesystem flag, as `mount_wiped` sets, that has the read path zero
+- a filesystem flag, as `mount_sealed`'s `wipe` sets, that has the read path zero
   its buffer before freeing it; or
 - the heap zeroing every allocation as it is freed (Linux's
   `init_on_free=1`), which costs every free a write of its size.

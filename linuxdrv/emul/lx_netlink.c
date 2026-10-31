@@ -99,7 +99,8 @@ const struct genl_family *lx_genl_family(const char *name)
  * the queue it gave.
  */
 #define LX_GENL_PORTID 1
-static u32 lx_genl_seq;
+/* Taken by more than one task (below): each request's number its own. */
+static atomic_t lx_genl_seq = ATOMIC_INIT(0);
 static struct sk_buff_head *lx_genl_replies;
 static u32 lx_genl_reply_seq;
 /*
@@ -115,7 +116,8 @@ struct sk_buff *lx_genl_request(const struct genl_family *family, u8 cmd)
 
 	if (!skb)
 		return NULL;
-	if (!genlmsg_put(skb, LX_GENL_PORTID, ++lx_genl_seq, family, NLM_F_REQUEST, cmd)) {
+	if (!genlmsg_put(skb, LX_GENL_PORTID, (u32)atomic_inc_return(&lx_genl_seq), family,
+			 NLM_F_REQUEST, cmd)) {
 		nlmsg_free(skb);
 		return NULL;
 	}

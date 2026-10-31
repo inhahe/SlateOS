@@ -1965,6 +1965,13 @@ CABLE_STEP=0
 CABLE_SEEN=0
 CABLE_FLOOR=0
 CABLE_PY=""
+# One command to QEMU's monitor, through screen.py: its status that of the
+# command (0, or what screen.py says went wrong), and what it printed kept in
+# HMP_SAID. Every HMP command the run sends goes through here.
+HMP_SAID=""
+hmp_run() {
+    HMP_SAID="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "$1" 2>&1)"
+}
 cable_responder() {
     [ -n "$CABLE_PY" ] && [ -f "$SERIAL_FILE" ] || return 0
     if [ "$CABLE_STEP" -ge 4 ]; then
@@ -1998,7 +2005,8 @@ cable_responder() {
     local state=off
     [ "$CABLE_STEP" -eq 3 ] && state=on
     local said rc=0
-    said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link net3 $state" 2>&1)" || rc=$?
+    hmp_run "set_link net3 $state" || rc=$?
+    said=$HMP_SAID
     if [ "$rc" -eq 0 ]; then
         echo "=== Cable: set_link net3 $state as the run asked ==="
         CABLE_STEP=$(( CABLE_STEP + 1 ))
@@ -2010,13 +2018,17 @@ cable_responder() {
 # The power button, pressed once when the kernel's ACPI self-test asks
 # ("[acpi] power button: press it", kernel/src/acpi/events.rs): QEMU's
 # system_powerdown, the ACPI power button's event, through the same monitor
-# and Python as the cable (acpi.pwrbtn=hmp on the command line says so). A
-# system_powerdown that fails is said and tried again the next second; the
-# self-test, waiting 20 s for the press, fails the boot if it never comes.
+# and Python as the cable (acpi.pwrbtn=hmp on the command line says so, and
+# that every press is the harness's, which the kernel records and never
+# acts on -- so a press sent twice, a failure that had reached QEMU all the
+# same, shuts nothing down). One that fails is said and tried again the next
+# second, five times at most; the self-test, waiting 20 s for the press,
+# fails the boot if it never comes.
 # The log is read from where the last look stopped, less 200 bytes for a
 # line split there. Not anchored: a kernel line can be printed into another.
 PWRBTN_STEP=0
 PWRBTN_SEEN=0
+PWRBTN_TRIES=0
 pwrbtn_responder() {
     [ -n "$CABLE_PY" ] && [ -f "$SERIAL_FILE" ] || return 0
     [ "$PWRBTN_STEP" -lt 2 ] || return 0
@@ -2029,13 +2041,17 @@ pwrbtn_responder() {
             || return 0
         PWRBTN_STEP=1
     fi
-    local said rc=0
-    said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "system_powerdown" 2>&1)" || rc=$?
+    local rc=0
+    PWRBTN_TRIES=$(( PWRBTN_TRIES + 1 ))
+    hmp_run "system_powerdown" || rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "=== Power button: system_powerdown as the run asked ==="
         PWRBTN_STEP=2
+    elif [ "$PWRBTN_TRIES" -ge 5 ]; then
+        echo "=== Power button: system_powerdown failed $PWRBTN_TRIES times (rc $rc)${HMP_SAID:+: $HMP_SAID}; given up ===" >&2
+        PWRBTN_STEP=2
     else
-        echo "=== Power button: system_powerdown failed (rc $rc)${said:+: $said}; trying again ===" >&2
+        echo "=== Power button: system_powerdown failed (rc $rc)${HMP_SAID:+: $HMP_SAID}; trying again ===" >&2
     fi
 }
 
@@ -2199,7 +2215,8 @@ card_boot_cable_step() {
                 CARD_BOOT_PULL_WAIT=$(( CARD_BOOT_PULL_WAIT - 1 ))
                 return 0
             fi
-            said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link $CARD_BOOT_NETDEV off" 2>&1)" || rc=$?
+            hmp_run "set_link $CARD_BOOT_NETDEV off" || rc=$?
+            said=$HMP_SAID
             if [ "$rc" -eq 0 ]; then
                 CARD_BOOT_CABLE=1
                 CARD_BOOT_PULLED="pulled"
@@ -2218,7 +2235,8 @@ card_boot_cable_step() {
             local waits=0
             [ -f "$CARD_SERIAL" ] && waits="$(grep -a -c -F -- "$CARD_BOOT_WAITING" "$CARD_SERIAL")" || true
             [ "${waits:-0}" -ge 2 ] || return 0
-            said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link $CARD_BOOT_NETDEV on" 2>&1)" || rc=$?
+            hmp_run "set_link $CARD_BOOT_NETDEV on" || rc=$?
+            said=$HMP_SAID
             if [ "$rc" -eq 0 ]; then
                 CARD_BOOT_CABLE=2
                 echo "=== Card boot: the daemon waits for the card's network; its cable plugged in ==="

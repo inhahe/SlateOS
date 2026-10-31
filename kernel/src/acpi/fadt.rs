@@ -147,6 +147,16 @@ const FADT_RESET_REG_OFFSET: usize = 116;
 const FADT_RESET_VALUE_OFFSET: usize = 128;
 /// Offset of X_DSDT (64-bit DSDT address) in FADT revision 3+.
 const FADT_X_DSDT_OFFSET: usize = 140;
+/// Offsets of the 64-bit register blocks' Generic Address Structures in
+/// FADT revision 3+ (ACPI 6.5 table 5.9): `X_PM1a_EVT_BLK`,
+/// `X_PM1b_EVT_BLK`, `X_PM1a_CNT_BLK`, `X_PM1b_CNT_BLK`, `X_GPE0_BLK`,
+/// `X_GPE1_BLK`.
+const FADT_X_PM1A_EVT_OFFSET: usize = 148;
+const FADT_X_PM1B_EVT_OFFSET: usize = 160;
+const FADT_X_PM1A_CNT_OFFSET: usize = 172;
+const FADT_X_PM1B_CNT_OFFSET: usize = 184;
+const FADT_X_GPE0_OFFSET: usize = 220;
+const FADT_X_GPE1_OFFSET: usize = 232;
 
 // ---------------------------------------------------------------------------
 // Parsed power management info
@@ -174,26 +184,38 @@ pub struct PowerInfo {
     pub dsdt_phys: u64,
     /// SCI interrupt number.
     pub sci_irq: u16,
-    /// PM1a and PM1b event blocks' I/O ports, 0 where absent: each block's
-    /// status register, then its enable register, `pm1_evt_len` bytes in
-    /// all.
+    /// The PM1a event block's I/O port, 0 where absent: its status register,
+    /// then its enable register, [`Self::pm1_evt_len`] bytes in all. The
+    /// 64-bit `X_PM1a_EVT_BLK`'s where that is set, else the legacy field's.
     pub pm1a_evt_blk: u16,
+    /// The PM1b event block's I/O port, 0 where absent, as `pm1a_evt_blk`.
     pub pm1b_evt_blk: u16,
+    /// Each PM1 event block's length in bytes, both registers.
     pub pm1_evt_len: u8,
-    /// GPE0 and GPE1 blocks' I/O ports, 0 where absent, and their lengths:
-    /// status bytes, then as many enable bytes.
+    /// The GPE0 block's I/O port, 0 where absent: status bytes, then as many
+    /// enable bytes. The 64-bit `X_GPE0_BLK`'s where that is set.
     pub gpe0_blk: u16,
+    /// The GPE0 block's length in bytes, both halves.
     pub gpe0_blk_len: u8,
+    /// The GPE1 block's I/O port, 0 where absent, as `gpe0_blk`.
     pub gpe1_blk: u16,
+    /// The GPE1 block's length in bytes, both halves.
     pub gpe1_blk_len: u8,
-    /// The SMI command port, and what is written to it to hand ACPI mode to
-    /// the OS; 0 where ACPI mode cannot be asked for (it is the OS's from the
-    /// start).
+    /// The SMI command port; 0 where there is none, which makes ACPI mode
+    /// the OS's from the start.
     pub smi_command: u16,
+    /// What is written to [`Self::smi_command`] to take ACPI mode from the
+    /// firmware.
     pub acpi_enable: u8,
+    /// What is written to [`Self::smi_command`] to give ACPI mode back.
+    pub acpi_disable: u8,
     /// Whether the platform is hardware-reduced ACPI (FADT flag 20): no
     /// fixed-feature hardware -- no PM1 registers, no fixed power button.
     pub hw_reduced: bool,
+    /// Whether the power button is the fixed-feature one, its event in PM1
+    /// (FADT flag 4, `PWR_BUTTON`, clear); a set flag makes it a
+    /// control-method device, which only AML can handle.
+    pub fixed_power_button: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +258,13 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
         )
     };
     // SAFETY: as above.
-    let (smi_command, acpi_enable) = unsafe { (port((*fadt).smi_command), (*fadt).acpi_enable) };
+    let (smi_command, acpi_enable, acpi_disable) = unsafe {
+        (
+            port((*fadt).smi_command),
+            (*fadt).acpi_enable,
+            (*fadt).acpi_disable,
+        )
+    };
     let dsdt_32 = unsafe { (*fadt).dsdt };
     let flags = unsafe { (*fadt).flags };
     let header = unsafe { (*fadt).header };
@@ -294,9 +322,43 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
         };
 
     serial_println!("[acpi]   DSDT at phys={:#x}", dsdt_phys);
+    // ACPI 2.0's 64-bit register blocks, which the OS is to use where they
+    // are set (ACPI 6.5 5.2.9): an I/O-space one's port wins over the legacy
+    // field, whose length stands unless it is 0, when the block's bit width
+    // gives it. One in another address space is none this module can reach.
+    let x_block = |offset: usize, legacy: u16, legacy_len: u8| -> (u16, u8) {
+        if total_len < offset.saturating_add(core::mem::size_of::<GenericAddress>()) {
+            return (legacy, legacy_len);
+        }
+        // SAFETY: within the validated FADT's length.
+        let gas = unsafe {
+            core::ptr::read_unaligned(
+                (fadt_virt as usize).saturating_add(offset) as *const GenericAddress
+            )
+        };
+        let (space, address, width) = (gas.address_space, gas.address, gas.bit_width);
+        match u16::try_from(address) {
+            Ok(x) if space == 1 && x != 0 => (
+                x,
+                if legacy_len != 0 {
+                    legacy_len
+                } else {
+                    width / 8
+                },
+            ),
+            _ => (legacy, legacy_len),
+        }
+    };
+    let (pm1a_evt, pm1_evt_len) = x_block(FADT_X_PM1A_EVT_OFFSET, pm1a_evt, pm1_evt_len);
+    let (pm1b_evt, _) = x_block(FADT_X_PM1B_EVT_OFFSET, pm1b_evt, pm1_evt_len);
+    let (pm1a, _) = x_block(FADT_X_PM1A_CNT_OFFSET, pm1a, 0);
+    let (pm1b, _) = x_block(FADT_X_PM1B_CNT_OFFSET, pm1b, 0);
+    let (gpe0, gpe0_len) = x_block(FADT_X_GPE0_OFFSET, gpe0, gpe0_len);
+    let (gpe1, gpe1_len) = x_block(FADT_X_GPE1_OFFSET, gpe1, gpe1_len);
     let hw_reduced = flags & (1 << 20) != 0;
+    let fixed_power_button = flags & (1 << 4) == 0;
     serial_println!(
-        "[acpi]   PM1a_EVT: {:#x}, PM1b_EVT: {:#x} (len {}), GPE0: {:#x} (len {}), GPE1: {:#x} (len {}), SMI_CMD: {:#x}, ACPI_ENABLE: {:#x}{}",
+        "[acpi]   PM1a_EVT: {:#x}, PM1b_EVT: {:#x} (len {}), GPE0: {:#x} (len {}), GPE1: {:#x} (len {}), SMI_CMD: {:#x}, ACPI_ENABLE: {:#x}, ACPI_DISABLE: {:#x}, power button {}{}",
         pm1a_evt,
         pm1b_evt,
         pm1_evt_len,
@@ -306,6 +368,12 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
         gpe1_len,
         smi_command,
         acpi_enable,
+        acpi_disable,
+        if fixed_power_button {
+            "fixed"
+        } else {
+            "a control-method device"
+        },
         if hw_reduced { ", hardware-reduced" } else { "" }
     );
 
@@ -328,7 +396,9 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
         gpe1_blk_len: gpe1_len,
         smi_command,
         acpi_enable,
+        acpi_disable,
         hw_reduced,
+        fixed_power_button,
     }
 }
 

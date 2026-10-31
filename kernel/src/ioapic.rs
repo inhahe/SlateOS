@@ -712,6 +712,38 @@ pub unsafe fn set_level_triggered(irq: u8) {
     unsafe { route(irq, |entry| entry | REDIR_LEVEL_TRIGGER | REDIR_ACTIVE_LOW) };
 }
 
+/// Program pin `irq`'s trigger mode -- level (`level`) or edge -- and its
+/// polarity -- active-low (`active_low`) or active-high -- nothing else
+/// about it changed: for a line whose owner knows its sense better than
+/// the MADT's overrides said (the ACPI SCI, whose fields an override
+/// leaves conforming are level and active-low). Nothing for a pin past the
+/// I/O APIC's.
+///
+/// # Safety
+///
+/// As [`set_level_triggered`]: the I/O APIC is initialized.
+pub unsafe fn set_trigger_polarity(irq: u8, level: bool, active_low: bool) {
+    let num = NUM_REDIR_ENTRIES.load(Ordering::Acquire);
+    if u64::from(irq) >= num {
+        return;
+    }
+    let sense = move |entry: u64| {
+        let entry = if level {
+            entry | REDIR_LEVEL_TRIGGER
+        } else {
+            entry & !REDIR_LEVEL_TRIGGER
+        };
+        if active_low {
+            entry | REDIR_ACTIVE_LOW
+        } else {
+            entry & !REDIR_ACTIVE_LOW
+        }
+    };
+    // SAFETY: IOAPIC is initialized, irq < num_entries; the window is not
+    // held.
+    unsafe { route(irq, sense) };
+}
+
 /// Set the CPU affinity for an IRQ — route it to a specific LAPIC.
 ///
 /// This modifies the destination field (bits 63:56) of the redirection

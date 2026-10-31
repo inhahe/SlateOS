@@ -1295,13 +1295,78 @@ def _cable_harness(body, python="bash"):
             handle.write(
                 "set -euo pipefail\n"
                 "SERIAL_FILE=serial.txt\nSCRIPT_DIR=.\nMONITOR_PORT=1\n"
-                f"CABLE_STEP=0\nCABLE_SEEN=0\nCABLE_FLOOR=0\nCABLE_PY={_sq(python)}\n"
+                f"CABLE_STEP=0\nCABLE_SEEN=0\nCABLE_FLOOR=0\nCABLE_PY={_sq(python)}\nHMP_SAID=\n"
+                + extract_shell_function("hmp_run") + "\n\n"
                 + extract_shell_function("cable_responder") + "\n\n"
                 + body)
         proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the cable responder")
         return None if proc is None else proc.stdout
     finally:
         drop_fixture(tmp)
+
+
+def _pwrbtn_harness(body):
+    """Run the real `pwrbtn_responder`, `screen.py` the fake `_cable_harness`
+    uses (its arguments appended to calls.txt, its exit code in rc.txt),
+    then `body`: its stdout, `None` on a hang."""
+    tmp = new_fixture()
+    try:
+        with open(os.path.join(tmp, "screen.py"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write('echo "$*" >> calls.txt\n'
+                         'exit "$(cat rc.txt 2>/dev/null || echo 0)"\n')
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -euo pipefail\n"
+                "SERIAL_FILE=serial.txt\nSCRIPT_DIR=.\nMONITOR_PORT=1\nCABLE_PY=bash\n"
+                "PWRBTN_STEP=0\nPWRBTN_SEEN=0\nPWRBTN_TRIES=0\nHMP_SAID=\n"
+                + extract_shell_function("hmp_run") + "\n\n"
+                + extract_shell_function("pwrbtn_responder") + "\n\n"
+                + body)
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the power-button responder")
+        return None if proc is None else proc.stdout
+    finally:
+        drop_fixture(tmp)
+
+
+def test_the_power_button_is_pressed_once_when_the_kernel_asks():
+    """`pwrbtn_responder` sends one system_powerdown once the kernel asks
+    ("power button: press it"), and none before; a call that fails is tried
+    again the next look, five times in all, then given up -- a press sent
+    twice is harmless, the kernel recording every harness press and acting
+    on none, but one sent forever is not."""
+    body = (
+        "step() { pwrbtn_responder 2>>errors.txt; echo \"step=$PWRBTN_STEP\"; }\n"
+        "printf 'nothing yet\\n' > serial.txt\n"
+        "step\n"
+        "printf '[acpi] power button: press it\\n' >> serial.txt\n"
+        "echo 2 > rc.txt\n"
+        "step\n"
+        "echo 0 > rc.txt\n"
+        "step\n"
+        "step\n"
+        "echo calls:; cat calls.txt\n")
+    out = _pwrbtn_harness(body)
+    check("the power-button responder ran to its end", out is not None, True)
+    if out is None:
+        return
+    lines = out.splitlines()
+    check("its steps: nothing asked, asked and failed, pressed, done",
+          [line for line in lines if line.startswith("step=")],
+          ["step=0", "step=1", "step=2", "step=2"])
+    calls = lines[lines.index("calls:") + 1:] if "calls:" in lines else []
+    check("system_powerdown twice (once failed), nothing else",
+          calls, ["hmp --hmp 1 system_powerdown", "hmp --hmp 1 system_powerdown"])
+    body = (
+        "printf '[acpi] power button: press it\\n' > serial.txt\n"
+        "echo 2 > rc.txt\n"
+        "for _ in 1 2 3 4 5 6 7; do pwrbtn_responder 2>>errors.txt; done\n"
+        "echo \"step=$PWRBTN_STEP calls=$(wc -l < calls.txt) given_up=$(grep -c 'given up' errors.txt)\"\n")
+    out = _pwrbtn_harness(body)
+    check("a press that keeps failing is given up after five tries",
+          (out or "").strip().splitlines()[-1:] if out else [],
+          ["step=2 calls=5 given_up=1"])
 
 
 def test_the_cable_is_pulled_and_plugged_back_once_each_when_the_daemon_asks():
@@ -2023,7 +2088,8 @@ def _card_cable(body):
                 + _card_boot_settings()
                 + "CARD_SERIAL=serial.txt\nSCRIPT_DIR=.\nMONITOR_PORT=1\nCABLE_PY=bash\n"
                 "CARD_BOOT_CABLE=0\nCARD_BOOT_PULLED=\nCARD_BOOT_PULL_FAILED=\n"
-                "CARD_BOOT_PULL_BACKOFF=1\nCARD_BOOT_PULL_WAIT=0\n"
+                "CARD_BOOT_PULL_BACKOFF=1\nCARD_BOOT_PULL_WAIT=0\nHMP_SAID=\n"
+                + extract_shell_function("hmp_run") + "\n\n"
                 + extract_shell_function("card_boot_cable_step") + "\n\n"
                 "step() { card_boot_cable_step 2>>errors.txt; "
                 "echo \"cable=$CARD_BOOT_CABLE pulled=$CARD_BOOT_PULLED\"; }\n"

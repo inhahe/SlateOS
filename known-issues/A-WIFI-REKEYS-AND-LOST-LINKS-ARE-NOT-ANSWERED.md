@@ -20,16 +20,19 @@ of its association (`lx_wifi_station`, `lx_wifi_keep`): its EAPOL frames
 are taken and answered for as long as the process runs -- message 3 sent
 again (its message 4 lost on the air) answered again without the keys
 installed twice, a new four-way handshake (a pairwise rekey) made with a
-nonce of its own, and the group key handshake (802.11-2020 12.7.7)
-answered and the renewed group key installed. Checked in every boot test's
-hwsim run, the access point there resending message 3 and renewing its
-group key after the handshake (`lx_wifi_kept_check`).
+nonce of its own -- its keys held apart (a temporary PTK) until a message 3
+signed with them arrives, so that a forged message 1 changes nothing -- and
+the group key handshake (802.11-2020 12.7.7) answered and the renewed group
+key installed. Checked in every boot test's hwsim run
+(`lx_wifi_kept_check`): after the handshake the access point resends
+message 3, makes a pairwise rekey, a frame crossing each way under the new
+keys, then renews its group key, a broadcast crossing under it.
 
 **The proper fix, for what is left.** In serve mode, listen to the `mlme`
 group for the life of the process, reading it from the keeper's side: on
 a disconnection, or a link lost, scan and join again
 (`lx_wifi_join_network`), the network file's PMK kept for it (the file is
-dropped before init, design-decisions 1596), the daemon's for-life wait
+dropped as soon as the join has read it, design-decisions 1596), the daemon's for-life wait
 (design-decisions 1594) carrying the sockets over the gap.
 
 Trigger: serving a WiFi card for the system's life.

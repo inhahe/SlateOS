@@ -822,6 +822,47 @@ pub fn is_registered(name: &[u8]) -> bool {
     reg.names.contains_key(name)
 }
 
+/// How a wait for a process to register a service ended
+/// ([`await_registered`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Awaited {
+    /// The service is registered.
+    Registered,
+    /// The process ended first -- a zombie, or gone from the table.
+    Ended,
+    /// Neither, by the deadline.
+    TimedOut,
+}
+
+/// Wait until the service `name` is registered, the process `pid` -- the one
+/// that is to register it -- has ended, or the monotonic clock passes
+/// `deadline_ns`, sleeping `poll_ms` between looks (slept rather than
+/// yielded, so that on one CPU the waiter does not take the registering
+/// process's time): which came first. The registry is looked at before the
+/// process, so a service registered by a process that then ended is
+/// [`Awaited::Registered`].
+pub fn await_registered(
+    name: &[u8],
+    pid: crate::proc::pcb::ProcessId,
+    deadline_ns: u64,
+    poll_ms: u64,
+) -> Awaited {
+    loop {
+        if is_registered(name) {
+            return Awaited::Registered;
+        }
+        if !crate::proc::pcb::state(pid)
+            .is_some_and(|s| s != crate::proc::pcb::ProcessState::Zombie)
+        {
+            return Awaited::Ended;
+        }
+        if crate::hrtimer::now_ns() >= deadline_ns {
+            return Awaited::TimedOut;
+        }
+        crate::sched::sleep_ms(poll_ms);
+    }
+}
+
 /// Get the number of pending (unaccepted) connections for a listener.
 ///
 /// Useful for monitoring/diagnostics.

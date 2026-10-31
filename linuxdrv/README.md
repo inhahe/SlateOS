@@ -206,15 +206,22 @@ key.
 With "join=<path>", the layer joins a real WPA2 network (design-decisions
 1596): the file at `<path>` names it -- an `ssid=` line and a `psk=` line,
 staged on the boot medium as the module `wifi/network` by `scripts/pikvm.py
-stage --wifi` -- which the kernel places on a sealed memfs at `/.boot-wifi`,
-gives a tree over only to the joining process, and unmounts before init so
-that no process after can read it. The process scans for the network by
+stage --wifi` -- which the kernel places on a sealed memfs at `/.boot-wifi`
+only for the join run, gives a tree over only to the joining process, and
+detaches as soon as that process has served the card or ended, so that no
+other process can read it; the memfs then zeroes its copy, and the kernel
+the boot module's. (Every boot test stages a network file for a network no
+one has, `mt7925e/boot-test.network`, which the kernel places and drops
+with no card to join by it.) The process scans for the network by
 name, judges each access point's RSN element (WPA2-PSK with CCMP; WPA3-only,
 TKIP or required management frame protection refused), connects to the
 strongest it can join, the next if one refuses, and makes the four-way
 handshake as the station; the station is then kept (`lx_wifi_keep`),
 answering the access point's key management for the life of the
-association -- a lost message 4, a pairwise rekey, the group key's renewal.
+association -- a lost message 4, a pairwise rekey, the group key's renewal;
+a message 1 never displaces the keys in force, only a message 3 signed with
+the keys it derived (a temporary PTK, 802.11-2020 12.7.6.1), so that a
+forged one cannot cut the link.
 With "serve=" as well, the joined interface is served to the network stack
 once the join is done (`lx_nic_await_link_layer`). On the test PC the
 kernel's self-test joins the operator's network this way and has the

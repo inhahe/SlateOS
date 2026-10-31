@@ -76,7 +76,7 @@ HELLO_BOOT_FW_FILE = Path("linuxdrv") / "hello" / "hello.fw"
 #: The name the image is kept under on the PiKVM.
 IMAGE_NAME = "slateos-pikvm.img"
 #: The WiFi network file's path on the ESP, and its module's name: the
-#: kernel places it under /.boot-wifi (linuxdrv::mount_boot_wifi; its
+#: kernel places it under /.boot-wifi for the join (linuxdrv::place_boot_wifi; its
 #: WIFI_MODULE and WIFI_NETWORK, which the self-test holds to this).
 WIFI_NETWORK = "wifi/network"
 #: The most a network file may hold: the driver reads no further

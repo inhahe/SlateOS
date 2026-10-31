@@ -102,6 +102,12 @@ const struct genl_family *lx_genl_family(const char *name)
 static u32 lx_genl_seq;
 static struct sk_buff_head *lx_genl_replies;
 static u32 lx_genl_reply_seq;
+/*
+ * One doit at a time: the reply target above is the one doit's under way,
+ * and the layer has more than one task asking -- a WiFi process's own and
+ * its station's keeper (lx_wifi.c), which installs keys from a worker.
+ */
+static DEFINE_MUTEX(lx_genl_doit_lock);
 
 struct sk_buff *lx_genl_request(const struct genl_family *family, u8 cmd)
 {
@@ -206,6 +212,7 @@ int lx_genl_doit(const struct genl_family *family, struct sk_buff *req,
 		.extack = &extack,
 	};
 	write_pnet(&info._net, &init_net);
+	mutex_lock(&lx_genl_doit_lock);
 	lx_genl_replies = replies;
 	lx_genl_reply_seq = nlh->nlmsg_seq;
 	err = op.pre_doit ? op.pre_doit(&op, req, &info) : 0;
@@ -215,6 +222,7 @@ int lx_genl_doit(const struct genl_family *family, struct sk_buff *req,
 			op.post_doit(&op, req, &info);
 	}
 	lx_genl_replies = NULL;
+	mutex_unlock(&lx_genl_doit_lock);
 out:
 	if (err && extack._msg)
 		pr_info("lx-genl: %s command %u: %s (%d)\n", family->name, hdr->cmd, extack._msg, err);

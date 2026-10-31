@@ -927,6 +927,18 @@ pub struct MemFs {
     size_limit: MemFsLimit,
     /// How many objects it may hold: tmpfs's `nr_inodes=`.
     inode_limit: MemFsLimit,
+    /// Whether every file's contents are zeroed as the filesystem is
+    /// dropped ([`mount_wiped`]): for one holding a secret, which the memory
+    /// it leaves to the allocator must not keep.
+    wipe_on_drop: bool,
+}
+
+impl Drop for MemFs {
+    fn drop(&mut self) {
+        if self.wipe_on_drop {
+            self.wipe_contents();
+        }
+    }
 }
 
 impl MemFs {
@@ -955,7 +967,44 @@ impl MemFs {
             held_blocks: 0,
             size_limit,
             inode_limit,
+            wipe_on_drop: false,
         }
+    }
+
+    /// Every file's contents zeroed where they lie, its length kept: its
+    /// bytes, or each frame it holds -- which the page cache and any mapping
+    /// of the file then read as zeros too. By volatile writes, which the
+    /// compiler may not drop as dead stores to memory about to be freed.
+    fn wipe_contents(&mut self) {
+        for node in self.inodes.values_mut() {
+            match &mut node.kind {
+                MemFsNodeKind::File(MemData::Bytes(bytes)) => {
+                    for byte in bytes.iter_mut() {
+                        // SAFETY: `byte` is a live, aligned, exclusive reference.
+                        unsafe { core::ptr::write_volatile(byte, 0) };
+                    }
+                }
+                MemFsNodeKind::File(MemData::Frames(frames)) => {
+                    for &held in frames.pages.values() {
+                        // A frame not reachable has nothing of the file's in
+                        // the direct map to wipe; the HHDM is always there
+                        // once memfs runs.
+                        let Ok(at) = frame_bytes(held) else { continue };
+                        for i in 0..FRAME_SIZE {
+                            // SAFETY: `held` is a frame of this file, which
+                            // holds a reference on it, so it is live and not
+                            // reused; `at` is its FRAME_SIZE bytes in the
+                            // direct map, `i` within them. Others reading it
+                            // (the cache, a mapping) read memory a write may
+                            // change at any time, as they always do.
+                            unsafe { core::ptr::write_volatile(at.add(i), 0) };
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 
     /// A new memfs as a tmpfs mount's options ask: `data` is the
@@ -2455,10 +2504,62 @@ pub fn mount<P: AsRef<crate::fs::path::Path> + ?Sized>(mount_path: &P) -> Kernel
     Ok(())
 }
 
+/// [`mount`], of a filesystem whose files' contents are zeroed when it is
+/// dropped -- once it is unmounted and nothing holds it -- rather than left
+/// to the allocator as they were: for one holding a secret (the boot
+/// medium's WiFi network file, design-decisions 1596).
+///
+/// # Errors
+/// [`mount`]'s.
+pub fn mount_wiped<P: AsRef<crate::fs::path::Path> + ?Sized>(mount_path: &P) -> KernelResult<()> {
+    let mut fs = MemFs::new();
+    fs.wipe_on_drop = true;
+    crate::fs::Vfs::mount(mount_path, Box::new(fs))?;
+    Ok(())
+}
+
+/// [`MemFs::wipe_contents`], which a filesystem of [`mount_wiped`] runs as
+/// it is dropped: a file of bytes and one of frames (past [`BYTES_MAX`]),
+/// read back as zeros of the length each had.
+///
+/// # Errors
+/// `IoError`, said, when either holds anything but zeros after.
+fn wipe_self_test() -> KernelResult<()> {
+    let mut fs = MemFs::new();
+    let small = alloc::vec![0x5Au8; 100];
+    let large_len = usize::try_from(BYTES_MAX).map_err(|_| KernelError::InternalError)?;
+    let large = alloc::vec![0xA5u8; large_len.saturating_add(FRAME_SIZE)];
+    fs.write_file(Path::new("/small"), &small)?;
+    fs.write_file(Path::new("/large"), &large)?;
+    let held = (
+        fs.read_file(Path::new("/small"))?,
+        fs.read_file(Path::new("/large"))?,
+    );
+    if held.0 != small || held.1 != large {
+        crate::serial_println!("[memfs]   FAILED: the files to wipe were not written as given");
+        return Err(KernelError::IoError);
+    }
+    fs.wipe_contents();
+    let wiped = (
+        fs.read_file(Path::new("/small"))?,
+        fs.read_file(Path::new("/large"))?,
+    );
+    let zeros = |got: &[u8], len: usize| got.len() == len && got.iter().all(|&b| b == 0);
+    if !zeros(&wiped.0, small.len()) || !zeros(&wiped.1, large.len()) {
+        crate::serial_println!(
+            "[memfs]   FAILED: a wiped file of bytes, or of frames, holds anything but zeros"
+        );
+        return Err(KernelError::IoError);
+    }
+    Ok(())
+}
+
 /// Self-test: verify basic MemFs operations including symlinks.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs] Running self-test...");
+
+    wipe_self_test()?;
 
     // Create a standalone MemFs instance (don't mount globally — avoid
     // interfering with the real VFS mount at /).

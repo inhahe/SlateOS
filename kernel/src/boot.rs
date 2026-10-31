@@ -167,8 +167,19 @@ pub fn module_count() -> usize {
 /// name ending within [`MODULE_NAME_MAX`] bytes -- never cut short, which
 /// would make it another's -- and any past [`MODULES_MAX`]. Empty when none
 /// was configured, or the kernel was started by kexec, which passes no
-/// modules on.
+/// modules on. A module's bytes never change, but for [`wipe_modules`].
 pub fn modules() -> impl Iterator<Item = (&'static [u8], &'static [u8])> {
+    module_parts().map(|(name, at, len)| {
+        // SAFETY: the module's contents: `len` bytes at `at` in the direct
+        // map, which Limine loaded and nothing frees -- and which nothing
+        // changes while a slice of them is used (wipe_modules' contract).
+        (name, unsafe { core::slice::from_raw_parts(at, len) })
+    })
+}
+
+/// [`modules`]: each one's name, and where its bytes are and how many --
+/// raw, so that [`wipe_modules`] can write them without a slice of them.
+fn module_parts() -> impl Iterator<Item = (&'static [u8], *const u8, usize)> {
     let (files, count) = match MODULE_REQUEST.response() {
         Some(r) if !r.modules.is_null() => (
             r.modules,
@@ -187,11 +198,7 @@ pub fn modules() -> impl Iterator<Item = (&'static [u8], &'static [u8])> {
             return None;
         }
         let size = usize::try_from(file.size).ok()?;
-        // SAFETY: the module's contents: `size` bytes at `address` in the
-        // direct map, which Limine loaded and nothing frees.
-        Some((name, unsafe {
-            core::slice::from_raw_parts(file.address, size)
-        }))
+        Some((name, file.address, size))
     })
 }
 
@@ -199,6 +206,42 @@ pub fn modules() -> impl Iterator<Item = (&'static [u8], &'static [u8])> {
 /// as [`modules`] gives them. `None` when no module has that name.
 pub fn module(name: &[u8]) -> Option<&'static [u8]> {
     modules().find(|&(n, _)| n == name).map(|(_, bytes)| bytes)
+}
+
+/// Every module whose name begins with `prefix` zeroed where the bootloader
+/// loaded it, its length kept: a secret the boot medium carried (its WiFi
+/// network file, design-decisions 1596), which the module's memory -- never
+/// freed -- would otherwise keep for the system's life. By volatile writes,
+/// through the direct map. How many held anything but zeros before.
+///
+/// # Safety
+///
+/// No slice [`modules`] or [`module`] gave of such a module may be used
+/// after: it promised bytes that do not change. Nothing may be reading one
+/// meanwhile.
+pub unsafe fn wipe_modules(prefix: &[u8]) -> usize {
+    let mut wiped = 0usize;
+    for (name, at, len) in module_parts() {
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let at = at.cast_mut();
+        // SAFETY: `at` is the module's `len` bytes in the direct map, which
+        // Limine loaded and nothing frees; `i` is within them.
+        let held = (0..len).any(|i| unsafe { core::ptr::read_volatile(at.add(i)) } != 0);
+        if !held {
+            continue;
+        }
+        for i in 0..len {
+            // SAFETY: as above; and the direct map maps them writable (only
+            // NX is added to it, mm::protect::harden_hhdm_nx). No slice of
+            // them is in use (this function's contract).
+            unsafe { core::ptr::write_volatile(at.add(i), 0) };
+        }
+        wiped = wiped.saturating_add(1);
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    wiped
 }
 
 /// The HHDM offset, read before any other kernel code has run.

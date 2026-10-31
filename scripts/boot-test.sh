@@ -9736,6 +9736,19 @@ if [ "$NO_STAGE" -eq 0 ]; then
             exit 1
         fi
     fi
+    # A WiFi network file on the boot medium, which the kernel places for a
+    # join and drops, wiping its module (design-decisions 1596): with no
+    # WiFi card under QEMU, placed and dropped with no join
+    # (linuxdrv::wifi_placement_check). A network no one has. Beside
+    # mt7925e only, its one reader.
+    rm -rf "$ESP_DIR/wifi"
+    if [ -f "$ESP_DIR/linuxdrv/mt7925e.elf" ]; then
+        if ! { mkdir -p "$ESP_DIR/wifi" &&
+               cp "$PROJECT_ROOT/linuxdrv/mt7925e/boot-test.network" "$ESP_DIR/wifi/network"; }; then
+            echo "ERROR: could not stage the boot medium's test WiFi network file." >&2
+            exit 1
+        fi
+    fi
 fi
 # Guard against a staged image that predates this build: it must be newer
 # than the freshly-built kernel binary we just compiled.  Skipped under
@@ -9803,15 +9816,16 @@ for name in "${LINUX_DRIVERS[@]}"; do
     MODULE_LINES+="    module_cmdline: linuxdrv/$name"$'\n'
     LINUXDRV_STAGED+="$name "
 done
-# The boot medium's firmware: each file under firmware/ a module named by
-# its path, which the kernel puts at the rest of that path under
-# /.boot-firmware.
-if [ -d "$ESP_DIR/firmware" ]; then
+# The boot medium's firmware and WiFi files: each file under firmware/ or
+# wifi/ a module named by its path, which the kernel puts at the rest of
+# that path under /.boot-firmware, or /.boot-wifi for a join.
+for staged in firmware wifi; do
+    [ -d "$ESP_DIR/$staged" ] || continue
     while IFS= read -r fw; do
         MODULE_LINES+="    module_path: boot():/$fw"$'\n'
         MODULE_LINES+="    module_cmdline: $fw"$'\n'
-    done < <(cd "$ESP_DIR" && find firmware -type f | LC_ALL=C sort)
-fi
+    done < <(cd "$ESP_DIR" && find "$staged" -type f | LC_ALL=C sort)
+done
 write_limine_conf "$KERNEL_CMDLINE" || limine_rc=$?
 case "$limine_rc" in
     0) ;;

@@ -1482,18 +1482,14 @@ extern "C" fn kernel_main() -> ! {
                     e
                 ),
             }
-            // And its WiFi network file, which only a joining WiFi driver
-            // process may read; never what it holds.
-            match linuxdrv::mount_boot_wifi() {
-                Ok(false) => {}
-                Ok(true) => serial_println!(
-                    "[boot] A WiFi network file from the boot medium, at {} (read-only)",
+            // And whether it carries a WiFi network file, which is placed
+            // only while a WiFi driver process joins by it; never what it
+            // holds.
+            if linuxdrv::note_boot_wifi() {
+                serial_println!(
+                    "[boot] The boot medium carries a WiFi network file: placed at {} only while a WiFi driver process joins by it",
                     linuxdrv::BOOT_WIFI_DIR
-                ),
-                Err(e) => serial_println!(
-                    "[boot] WARNING: the boot medium's WiFi network file was not placed: {:?}",
-                    e
-                ),
+                );
             }
 
             // Probe secondary block devices for ext4 filesystems.
@@ -9129,9 +9125,9 @@ extern "C" fn kernel_main() -> ! {
                     }
                 }
             }
-            // The WiFi network file's last reader -- the driver processes the
-            // kernel starts -- has run: dropped before any other process
-            // can, root's included (design-decisions 1596).
+            // The WiFi network file is dropped as soon as its reader has read
+            // it; dropped again here, in case, before any other process can
+            // run (design-decisions 1596).
             linuxdrv::drop_boot_wifi();
 
             // Arm the container healthcheck supervisor. Deferred to here — after every

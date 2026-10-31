@@ -5673,15 +5673,24 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
     };
 
     // Wait for the daemon to publish `net.stack` (it registers early, before the
-    // slow ARP/DNS work).  Yield so the daemon actually gets CPU time.
-    let reg_deadline = crate::hrtimer::now_ns().saturating_add(3_000_000_000); // 3s
-    while !service::is_registered(b"net.stack") {
-        if crate::hrtimer::now_ns() >= reg_deadline {
+    // slow ARP/DNS work): 3 s, or until it has ended.
+    let reg_deadline = crate::hrtimer::now_ns().saturating_add(3_000_000_000);
+    match service::await_registered(b"net.stack", result.pid, reg_deadline, 1) {
+        service::Awaited::Registered => {}
+        service::Awaited::Ended => {
+            serial_println!(
+                "[spawn]   FAIL: netstack ended (exit {:?}) before it registered net.stack",
+                crate::proc::pcb::exit_code(result.pid)
+            );
+            // Reaped, the zombie's slot freed; its exit is said above.
+            let _ = crate::container::wait_process(result.pid);
+            return Err(KernelError::InternalError);
+        }
+        service::Awaited::TimedOut => {
             serial_println!("[spawn]   FAIL: netstack did not register net.stack within 3s");
             let _ = crate::container::wait_process(result.pid);
             return Err(KernelError::TimedOut);
         }
-        crate::sched::yield_now();
     }
 
     // Ask it to resolve a well-known name. The daemon does real network I/O
@@ -6132,15 +6141,23 @@ pub fn run_persistent_netstack(card: Option<&str>) -> KernelResult<()> {
     let began = crate::hrtimer::now_ns();
     let reg_deadline = began.saturating_add(reg_wait_s.saturating_mul(1_000_000_000));
     let mut said_s = 0u64;
-    while !service::is_registered(b"net.stack") {
-        if crate::proc::pcb::state(result.pid) == Some(crate::proc::pcb::ProcessState::Zombie) {
-            // The card is not made the root namespace's network: its
-            // sockets and resolver stay the kernel's NIC's.
-            serial_println!(
-                "[spawn]   FAIL: the persistent netstack daemon ended (exit {:?}) before it registered net.stack",
-                crate::proc::pcb::exit_code(result.pid)
-            );
-            return Err(KernelError::InternalError);
+    loop {
+        // Waited for in 10 s spans, each said over a card.
+        let span = crate::hrtimer::now_ns()
+            .saturating_add(10_000_000_000)
+            .min(reg_deadline);
+        match service::await_registered(b"net.stack", result.pid, span, 10) {
+            service::Awaited::Registered => break,
+            service::Awaited::Ended => {
+                // The card is not made the root namespace's network: its
+                // sockets and resolver stay the kernel's NIC's.
+                serial_println!(
+                    "[spawn]   FAIL: the persistent netstack daemon ended (exit {:?}) before it registered net.stack",
+                    crate::proc::pcb::exit_code(result.pid)
+                );
+                return Err(KernelError::InternalError);
+            }
+            service::Awaited::TimedOut => {}
         }
         let now = crate::hrtimer::now_ns();
         if now >= reg_deadline {
@@ -6173,7 +6190,6 @@ pub fn run_persistent_netstack(card: Option<&str>) -> KernelResult<()> {
                 reg_wait_s
             );
         }
-        crate::sched::sleep_ms(10);
     }
     serial_println!(
         "[spawn]   persistent netstack daemon registered net.stack (pid {})",

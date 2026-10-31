@@ -766,6 +766,24 @@ int sched_setscheduler_nocheck(struct task_struct *p, int policy,
 	return 0;
 }
 
+/*
+ * The real-time policies a driver gives its own threads -- mt76's workers
+ * ask for SCHED_FIFO at its lowest priority (sched_set_fifo_low), for their
+ * frames' latency -- and the way back to the normal one: every thread here
+ * runs at one priority, so each changes nothing, as set_user_nice() does.
+ */
+void sched_set_fifo(struct task_struct *p)
+{
+}
+
+void sched_set_fifo_low(struct task_struct *p)
+{
+}
+
+void sched_set_normal(struct task_struct *p, int nice)
+{
+}
+
 void ignore_signals(struct task_struct *t)
 {
 }

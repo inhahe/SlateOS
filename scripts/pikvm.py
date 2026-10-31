@@ -12,10 +12,12 @@ USB drive, and works its power button. This script is how a session drives it:
     python scripts/pikvm.py snap <out.png> [--crop X0,Y0,X1,Y1]
     python scripts/pikvm.py power on|off|off-hard|reset-hard
 
-`boot` restarts the PC by cutting its power, so it refuses a PC that is on
-unless `--off-hard` says what runs there is SlateOS: Windows is shut down
-from its Start menu first (its power button is set to do nothing), or it
-loses what is open and is not shut down properly.
+`boot` shuts a PC that is on down first, with a press of its power button,
+which shuts Windows down properly (Windows' power button setting, since
+2026-10-31), and goes on once the power light is out. SlateOS does nothing
+with the button yet: for it, `--off-hard` cuts the power instead (the
+button held down), which loses nothing, since it may write only the spare
+disk -- never for Windows, which would lose what is open.
 
 `stage` builds the USB image from a worktree's built kernel: Limine, the kernel
 (debug info stripped), the Linux driver processes -- built first, as the boot
@@ -597,38 +599,48 @@ def stage_esp(worktree: Path, esp: Path, cmdline: str, modules: tuple[str, ...],
         encoding="utf-8", newline="\n")
 
 
-def check_may_cut_power(kvm, off_hard: bool) -> None:
-    """Refuse, before anything is done, to restart a PC that is on unless
-    `off_hard` says what it runs may lose its power: `boot` restarts it by
-    holding the power button down, which cuts the power. That is safe for
-    SlateOS, which may write only the spare disk, and no way to stop
-    Windows, which loses what is open and is left not shut down: shut
-    Windows down from its Start menu first -- its power button is set to do
-    nothing -- then boot."""
-    if kvm.leds()["power"] and not off_hard:
-        sys.exit("pikvm: the PC is on, and boot would cut its power. Look at what it runs "
-                 "(pikvm.py snap): shut Windows down from its Start menu first, or pass "
-                 "--off-hard when what runs is SlateOS")
+#: How long a press of the power button has to shut Windows down.
+SHUTDOWN_SECONDS = 180
+#: How long the power light may stay on once the button has been held down.
+OFF_HARD_SECONDS = 15
+
+
+def shut_down(kvm, off_hard: bool, wait_s: float = SHUTDOWN_SECONDS) -> None:
+    """The PC off, before `boot` starts it again: nothing when it is off
+    already. Else its power button pressed, which shuts Windows down
+    properly (its power button setting), and `wait_s` given for the power
+    light to go out; or, `off_hard`, the button held down, which cuts the
+    power -- for SlateOS, which does nothing with the button yet and loses
+    nothing, never for Windows. Exits, the PC left on, when the light stays
+    on: SlateOS pressed without `off_hard`, or Windows held up by something
+    open."""
+    if not kvm.leds()["power"]:
+        return
+    kvm.power("off_hard" if off_hard else "off")
+    deadline = time.monotonic() + (OFF_HARD_SECONDS if off_hard else wait_s)
+    while kvm.leds()["power"]:
+        if time.monotonic() >= deadline:
+            if off_hard:
+                sys.exit("pikvm: the PC is still on after its power button was held down")
+            sys.exit(f"pikvm: the PC did not shut down within {wait_s:.0f} s of a press of its "
+                     "power button. Look at what it runs (pikvm.py snap): SlateOS does nothing "
+                     "with the button yet -- pass --off-hard for it -- and Windows may be "
+                     "waiting on something open")
+        time.sleep(1)
 
 
 def boot(kvm: PiKvm, image: Path, menu_key: str, off_hard: bool) -> None:
-    """Upload `image`, restart the PC, and pick the PiKVM drive in its boot
-    menu: a PC that is on only with `off_hard`, which cuts its power
-    ([`check_may_cut_power`]). The click is checked as far as pictures
-    allow: one the menu does not take (the screen unchanged) is made again.
-    A screen that changes is taken for the boot starting -- which it may not
-    be, if what settled was a logo before the menu; `watch` or `snap` shows
-    which."""
+    """Shut the PC down ([`shut_down`]; `off_hard` cuts its power), upload
+    `image` -- the drive taken from the PC only once nothing runs there to
+    lose it -- start the PC, and pick the PiKVM drive in its boot menu. The
+    click is checked as far as pictures allow: one the menu does not take
+    (the screen unchanged) is made again. A screen that changes is taken for
+    the boot starting -- which it may not be, if what settled was a logo
+    before the menu; `watch` or `snap` shows which."""
     if not kvm.boot_entry_xy:
         sys.exit("pikvm: boot needs boot_entry_xy in ~/.pikvm: where the boot menu shows the PiKVM drive")
-    check_may_cut_power(kvm, off_hard)
+    shut_down(kvm, off_hard)
     kvm.upload(image)
-    if kvm.leds()["power"]:
-        kvm.power("off_hard")
-        for _ in range(15):
-            time.sleep(1)
-            if not kvm.leds()["power"]:
-                break
     time.sleep(2)
     kvm.power("on")
     for _ in range(MENU_KEY_SECONDS * 4):
@@ -755,23 +767,35 @@ def self_test() -> int:
           [c for c in map(chr, range(32, 127)) if c not in dv or c not in us], [])
     check("coordinates: the corners", (to_absolute(0, WIDTH), to_absolute(WIDTH, WIDTH)), (-32768, 32767))
 
-    class Lit:
-        """A PiKVM whose power light reads `on`."""
-        def __init__(self, on):
-            self.on = on
+    class Pc:
+        """A PiKVM's PC: on or off, running Windows -- which a press of its
+        power button shuts down -- or SlateOS, which a press does nothing
+        to; holding the button down cuts either off. Its presses kept."""
+        def __init__(self, on, windows):
+            self.on, self.windows, self.presses = on, windows, []
 
         def leds(self):
             return {"power": self.on, "hdd": False}
 
-    def cuts(on, off_hard):
+        def power(self, action):
+            self.presses.append(action)
+            if action == "off_hard" or (action == "off" and self.windows):
+                self.on = False
+
+    def shuts(on, windows, off_hard):
+        pc = Pc(on, windows)
         try:
-            check_may_cut_power(Lit(on), off_hard)
+            shut_down(pc, off_hard, wait_s=0)
         except SystemExit:
-            return "refused"
-        return "let through"
-    check("boot: a PC that is on is not cut off unasked", cuts(True, False), "refused")
-    check("boot: --off-hard cuts off a PC that is on", cuts(True, True), "let through")
-    check("boot: a PC that is off needs no --off-hard", cuts(False, False), "let through")
+            return ("left on" if pc.on else "exited off", pc.presses)
+        return ("off" if not pc.on else "returned on", pc.presses)
+    check("boot: Windows is shut down with a press, not a power cut",
+          shuts(True, True, False), ("off", ["off"]))
+    check("boot: SlateOS pressed and still on is left on, and said",
+          shuts(True, False, False), ("left on", ["off"]))
+    check("boot: --off-hard cuts the power, with no press first",
+          shuts(True, False, True), ("off", ["off_hard"]))
+    check("boot: a PC that is off is not pressed", shuts(False, True, False), ("off", []))
     check("typing: a line, its Enter", key_presses("ls\n", "us"),
           [("KeyL", False), ("KeyS", False), ("Enter", False)])
     try:
@@ -1157,8 +1181,9 @@ def main(argv: list[str]) -> int:
     p.add_argument("image", type=Path)
     p.add_argument("--menu-key", default="F12")
     p.add_argument("--off-hard", action="store_true",
-                   help="cut the power of a PC that is on: only when it runs SlateOS, "
-                        "never Windows, which is shut down from its Start menu first")
+                   help="cut the power of a PC that is on (the button held down) rather than "
+                        "press its button: only when it runs SlateOS, which does nothing with "
+                        "the button yet -- never Windows, which a press shuts down properly")
     p = sub.add_parser("watch")
     p.add_argument("--seconds", type=float, default=90)
     p.add_argument("--every", type=float, default=6)

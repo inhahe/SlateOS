@@ -390,11 +390,10 @@ class PiKvm:
 
     def upload(self, image: Path) -> None:
         """Put `image` on the virtual drive as a read-only flash drive, connected."""
-        # Read first: a missing or unreadable image fails here, before the
-        # PiKVM's drive is touched, not as a "cut off" upload.
-        size = image.stat().st_size
-        with image.open("rb"):
-            pass
+        # Checked first (check_upload): a missing or unreadable image, or one
+        # with no room for it, fails here, before the PiKVM's drive is
+        # touched, not as a "cut off" upload.
+        size = check_upload(self, image)
         self.set_connected(False)
         for attempt in range(1, RETRIES + 1):
             self.wait_idle()
@@ -1147,9 +1146,10 @@ def self_test_requests(check) -> None:
                          ("ShiftLeft", False), ("KeyB", True), ("KeyB", False)])
         stub = Stub([True])
         try:
-            PiKvm.upload(stub, Path("no-such-image.img"))
-            check("upload: a missing image fails", "uploaded", "raised")
-        except FileNotFoundError:
+            with contextlib.redirect_stderr(io.StringIO()):
+                PiKvm.upload(stub, Path("no-such-image.img"))
+            check("upload: a missing image fails", "uploaded", "refused")
+        except SystemExit:
             check("upload: a missing image fails before the drive is touched", stub.log, [])
 
         class UploadStub(Stub):

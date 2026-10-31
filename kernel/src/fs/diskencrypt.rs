@@ -44,6 +44,7 @@ use crate::crypto::{Secret, wipe};
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -234,7 +235,7 @@ struct Volume {
     mount_point: PathBuf,
     progress_pct: u8,
     /// The master key, while the volume is unlocked (or being encrypted).
-    master: Option<Secret<MASTER_KEY_LEN>>,
+    master: Option<Box<Secret<MASTER_KEY_LEN>>>,
 }
 
 impl Volume {
@@ -375,7 +376,7 @@ fn open_slot(
     uuid: &[u8; 16],
     slot: &Slot,
     secret: &[u8],
-) -> KernelResult<Option<Secret<MASTER_KEY_LEN>>> {
+) -> KernelResult<Option<Box<Secret<MASTER_KEY_LEN>>>> {
     let kek = Secret(seal::derive_key(secret, &slot.salt, slot.cost).map_err(seal_error)?);
     let Ok(mut opened) = seal::decrypt(
         &kek.0,
@@ -385,7 +386,7 @@ fn open_slot(
     ) else {
         return Ok(None);
     };
-    let mut master = Secret::<MASTER_KEY_LEN>::zeroed();
+    let mut master = Box::new(Secret::<MASTER_KEY_LEN>::zeroed());
     let fits = opened.len() == MASTER_KEY_LEN;
     if fits {
         master.0.copy_from_slice(&opened);
@@ -468,7 +469,7 @@ pub fn register_volume(
     }
     let mut uuid = [0u8; 16];
     random(&mut uuid)?;
-    let mut master = Secret::<MASTER_KEY_LEN>::zeroed();
+    let mut master = Box::new(Secret::<MASTER_KEY_LEN>::zeroed());
     random(&mut master.0)?;
     let slot = make_slot(
         &uuid,
@@ -569,11 +570,11 @@ pub fn lock_volume(id: u32) -> KernelResult<()> {
 
 /// The master key of the unlocked volume `id`, copied out with its identity,
 /// for a slot to be sealed with no lock held.
-fn master_of(id: u32) -> KernelResult<([u8; 16], Secret<MASTER_KEY_LEN>)> {
+fn master_of(id: u32) -> KernelResult<([u8; 16], Box<Secret<MASTER_KEY_LEN>>)> {
     with_state(|state| {
         let vol = volume_mut(state, id)?;
         let master = vol.master.as_ref().ok_or(KernelError::PermissionDenied)?;
-        let mut copy = Secret::<MASTER_KEY_LEN>::zeroed();
+        let mut copy = Box::new(Secret::<MASTER_KEY_LEN>::zeroed());
         copy.0.copy_from_slice(&master.0);
         Ok((vol.uuid, copy))
     })
@@ -721,7 +722,7 @@ pub fn start_encryption(
     })?;
     let mut uuid = [0u8; 16];
     random(&mut uuid)?;
-    let mut master = Secret::<MASTER_KEY_LEN>::zeroed();
+    let mut master = Box::new(Secret::<MASTER_KEY_LEN>::zeroed());
     random(&mut master.0)?;
     let slot = make_slot(
         &uuid,

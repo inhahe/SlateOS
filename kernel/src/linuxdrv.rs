@@ -816,14 +816,21 @@ const FIRMWARE_MODULE: &[u8] = b"firmware/";
 /// what follows `prefix`, as bytes, as a path is. `None` for a module not
 /// named so; why not, for one whose path is no path -- empty, or with an
 /// empty, `.` or `..` component, any of which would put the file elsewhere
-/// or nowhere.
+/// or nowhere -- or one no lookup could name, a component longer than
+/// [`crate::fs::vfs::MAX_COMPONENT_LEN`].
 fn module_path<'a>(prefix: &[u8], name: &'a [u8]) -> Option<Result<&'a [u8], &'static str>> {
     let path = name.strip_prefix(prefix)?;
-    if path
-        .split(|&b| b == b'/')
+    let mut components = path.split(|&b| b == b'/');
+    if components
+        .clone()
         .any(|c| c.is_empty() || c == b"." || c == b"..")
     {
         return Some(Err("its path is empty, or has an empty, . or .. component"));
+    }
+    if components.any(|c| c.len() > crate::fs::vfs::MAX_COMPONENT_LEN) {
+        return Some(Err(
+            "its path has a component longer than 255 bytes, which no lookup can name",
+        ));
     }
     Some(Ok(path))
 }
@@ -883,50 +890,52 @@ fn module_files<'a>(
 /// as a whole from the start ([`crate::fs::memfs::mount_sealed`]): a driver
 /// process loads what the boot medium carried, and nothing another process
 /// put there. `wipe`: a memfs that zeroes them as it is dropped, for a
-/// secret. Nothing is mounted for no files. How many files were placed, and
-/// their bytes.
+/// secret. Nothing is mounted for no files. What was placed ([`Placed`]).
 ///
 /// # Errors
 ///
 /// The memfs's, when a file cannot be written, or the VFS's, when it
 /// cannot be mounted: nothing is mounted then, as no firmware rather than
 /// some.
-fn place_firmware(
-    files: &[FirmwareFile<'_>],
-    at: &str,
-    wipe: bool,
-) -> KernelResult<(usize, usize)> {
+fn place_firmware(files: &[FirmwareFile<'_>], at: &str, wipe: bool) -> KernelResult<Placed> {
     use crate::fs::path::Path;
     if files.is_empty() {
-        return Ok((0, 0));
+        return Ok(Placed::default());
     }
     let named: alloc::vec::Vec<(&Path, &[u8])> = files
         .iter()
         .map(|&(path, data)| (Path::new(path), data))
         .collect();
-    crate::fs::memfs::mount_sealed(Path::new(at), &named, wipe)?;
-    let bytes = files
-        .iter()
-        .fold(0usize, |sum, &(_, data)| sum.saturating_add(data.len()));
-    Ok((files.len(), bytes))
+    let fs_id = crate::fs::memfs::mount_sealed(Path::new(at), &named, wipe)?;
+    Ok(Placed {
+        files: files.len(),
+        bytes: files
+            .iter()
+            .fold(0usize, |sum, &(_, data)| sum.saturating_add(data.len())),
+        fs_id: Some(fs_id),
+    })
+}
+
+/// What [`place_firmware`] placed: how many files, their bytes, and the
+/// identity of the filesystem they are on (as [`crate::fs::vfs::FileId`]
+/// carries it), `None` when there were none and nothing was mounted.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Placed {
+    files: usize,
+    bytes: usize,
+    fs_id: Option<u64>,
 }
 
 /// The files of the boot medium's modules named `<prefix><path>`, `what`
 /// they are said to be, placed at `<path>` under `dir` on a memfs of its own
 /// sealed read-only -- `wipe`, one that zeroes them as it goes
-/// ([`place_firmware`]): how many were placed, and their bytes, none when
-/// there are none.
+/// ([`place_firmware`]): what was placed, nothing when there is none.
 ///
 /// # Errors
 ///
 /// `InvalidArgument`, said, for a module [`module_files`] refuses: nothing
 /// is placed. [`place_firmware`]'s.
-fn mount_boot_files(
-    prefix: &[u8],
-    dir: &str,
-    what: &str,
-    wipe: bool,
-) -> KernelResult<(usize, usize)> {
+fn mount_boot_files(prefix: &[u8], dir: &str, what: &str, wipe: bool) -> KernelResult<Placed> {
     let files = module_files(prefix, crate::boot::modules()).map_err(|refused| {
         serial_println!(
             "[boot] {what} module \"{}\": {}; nothing of it placed",
@@ -959,11 +968,11 @@ pub fn mount_boot_firmware() -> KernelResult<(usize, usize)> {
             loaded.saturating_sub(read)
         );
     }
-    let (files, bytes) = mount_boot_files(FIRMWARE_MODULE, BOOT_FIRMWARE_DIR, "firmware", false)?;
-    if files > 0 {
+    let placed = mount_boot_files(FIRMWARE_MODULE, BOOT_FIRMWARE_DIR, "firmware", false)?;
+    if placed.files > 0 {
         BOOT_FIRMWARE_PLACED.store(true, core::sync::atomic::Ordering::Release);
     }
-    Ok((files, bytes))
+    Ok((placed.files, placed.bytes))
 }
 
 /// Where the boot medium's WiFi network file is put while a WiFi driver
@@ -1039,20 +1048,17 @@ fn place_boot_wifi() -> KernelResult<(ResourceType, u64, Rights)> {
     if !BOOT_WIFI_CARRIED.load(core::sync::atomic::Ordering::Acquire) {
         return Err(KernelError::NotFound);
     }
-    mount_boot_files(WIFI_MODULE, BOOT_WIFI_DIR, "WiFi", true)?;
-    // Its identity, which the drop detaches it by, wherever it is mounted by
-    // then. Without one it is taken down again at once, by its path: nothing
-    // has run beside it yet.
-    match crate::fs::vfs::Vfs::pin_dir(BOOT_WIFI_DIR).map(|pinned| pinned.id) {
-        Ok(Some(id)) => BOOT_WIFI_FS.store(id.fs_id, core::sync::atomic::Ordering::Release),
-        pinned => {
-            let detached = crate::fs::vfs::Vfs::unmount_detach(BOOT_WIFI_DIR);
-            serial_println!(
-                "[linuxdrv]   FAIL: the WiFi files' filesystem, just mounted at {BOOT_WIFI_DIR}, has no identity to drop it by ({pinned:?}); taken down by its path: {detached:?}"
-            );
-            return Err(KernelError::InternalError);
-        }
-    }
+    let placed = mount_boot_files(WIFI_MODULE, BOOT_WIFI_DIR, "WiFi", true)?;
+    // Its identity, as its mount gave it -- not looked up after, when
+    // something else could be mounted on top -- which the drop detaches it
+    // by, wherever it is mounted by then.
+    let Some(fs_id) = placed.fs_id else {
+        serial_println!(
+            "[linuxdrv]   FAIL: the boot medium was noted to carry a WiFi network file, but no WiFi file was placed"
+        );
+        return Err(KernelError::InternalError);
+    };
+    BOOT_WIFI_FS.store(fs_id, core::sync::atomic::Ordering::Release);
     match crate::fs::trees::register(crate::fs::path::Path::new(BOOT_WIFI_DIR)) {
         Ok(id) => Ok((ResourceType::FileTree, id, Rights::READ)),
         Err(e) => {
@@ -1084,21 +1090,21 @@ pub fn drop_boot_wifi() -> KernelResult<()> {
     use core::sync::atomic::Ordering;
     let fs_id = BOOT_WIFI_FS.load(Ordering::Acquire);
     let detached = if fs_id == 0 {
-        0
+        Ok(0)
     } else {
         Vfs::detach_filesystem(fs_id)
     };
     let gone = fs_id == 0 || !Vfs::filesystem_mounted(fs_id);
     if gone {
         BOOT_WIFI_FS.store(0, Ordering::Release);
-        if detached > 0 {
+        if let Ok(n @ 1..) = detached {
             serial_println!(
-                "[linuxdrv] the boot medium's WiFi files dropped ({detached} mount(s) detached): no process reaches them from here on"
+                "[linuxdrv] the boot medium's WiFi files dropped ({n} mount(s) detached): no process reaches them from here on"
             );
         }
     } else {
         serial_println!(
-            "[linuxdrv]   FAIL: the boot medium's WiFi files are still mounted after {detached} mount(s) of them were detached: a process may read them"
+            "[linuxdrv]   FAIL: the boot medium's WiFi files are still mounted after their detach ({detached:?}): a process may read them"
         );
     }
     BOOT_WIFI_CARRIED.store(false, Ordering::Release);
@@ -1144,10 +1150,11 @@ pub fn drop_boot_wifi_before_init() {
 /// dropped -- a mount namespace made while it was placed, as by a process
 /// unsharing during a join, holding a copy of its mount, and a mount
 /// stacked on it at its path, as `mount(2)` stacks one -- its filesystem
-/// mounted nowhere, the stacked mount gone with it, the path naming nothing, the memfs zeroing every byte
-/// of the file as it went ([`crate::fs::memfs::wiped_bytes_on_drop`]), the
-/// module wiped and nothing left to place. Every boot test checks this, staging a
-/// network file of its own for a network no one has
+/// mounted nowhere, the stacked mount gone with it, the path naming
+/// nothing, the memfs zeroing every byte of every `wifi/` file as it went
+/// ([`crate::fs::memfs::wiped_bytes_on_drop`]), the module wiped and
+/// nothing left to place. Every boot test checks this, staging a network
+/// file of its own for a network no one has
 /// (`linuxdrv/mt7925e/boot-test.network`, `scripts/boot-test.sh`).
 ///
 /// # Errors
@@ -1159,6 +1166,14 @@ fn wifi_placement_check() -> KernelResult<()> {
     let len = crate::boot::module(&module)
         .map(<[u8]>::len)
         .and_then(|n| u64::try_from(n).ok());
+    // Every `wifi/` file goes on the memfs, the network file among them.
+    let all = crate::boot::modules()
+        .filter(|(name, _)| name.starts_with(WIFI_MODULE))
+        .try_fold(0u64, |sum, (_, bytes)| {
+            u64::try_from(bytes.len())
+                .ok()
+                .and_then(|n| sum.checked_add(n))
+        });
     let wiped_before = crate::fs::memfs::wiped_bytes_on_drop();
     let placed = place_boot_wifi();
     let held = Vfs::metadata(wifi_network_file().as_str()).map(|m| m.size);
@@ -1205,7 +1220,7 @@ fn wifi_placement_check() -> KernelResult<()> {
             && stacked.is_ok()
             && !stacked_left
             && dropped.is_ok()
-            && Some(memfs_wiped) == len =>
+            && all.is_some_and(|all| memfs_wiped >= all) =>
         {
             serial_println!(
                 "[linuxdrv]   the WiFi network file placed with no card to join by it, and dropped -- a namespace's copy of its mount and a mount stacked on it too: mounted nowhere, its path naming nothing, its {memfs_wiped} byte(s) zeroed in the memfs, its module wiped"
@@ -1260,6 +1275,21 @@ fn check_firmware_module_path() -> KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+    }
+    // A component as long as a lookup takes, and one byte longer.
+    let longest: alloc::vec::Vec<u8> = [
+        FIRMWARE_MODULE,
+        &[b'a'; crate::fs::vfs::MAX_COMPONENT_LEN][..],
+    ]
+    .concat();
+    let longer: alloc::vec::Vec<u8> = [&longest[..], b"a"].concat();
+    if module_path(FIRMWARE_MODULE, &longest).is_none_or(|p| p.is_err())
+        || module_path(FIRMWARE_MODULE, &longer).is_none_or(|p| p.is_ok())
+    {
+        serial_println!(
+            "[linuxdrv]   FAIL: a firmware module whose path has a 255-byte component was refused, or one with 256 bytes was not"
+        );
+        return Err(KernelError::InternalError);
     }
     check_firmware_files()
 }
@@ -1382,7 +1412,7 @@ fn check_place_firmware(skips: &mut crate::fs::selftest::Skips) -> KernelResult<
     // failure is answered: true when nothing is left. A scratch mount that
     // will not go stays in /tmp, which the next boot does not see.
     let gone = || !is_mounted(AT) || Vfs::unmount(AT).is_ok();
-    if place_firmware(&[], AT, false) != Ok((0, 0)) || is_mounted(AT) {
+    if place_firmware(&[], AT, false) != Ok(Placed::default()) || is_mounted(AT) {
         gone();
         return Err(fail("no files mounted something"));
     }
@@ -1396,7 +1426,10 @@ fn check_place_firmware(skips: &mut crate::fs::selftest::Skips) -> KernelResult<
     if !gone() {
         return Err(fail("the placed files' scratch mount would not go"));
     }
-    if placed != Ok((2, 7)) || found != (Ok(b"one".to_vec()), Ok(b"two!".to_vec())) || written {
+    if placed.map(|p| (p.files, p.bytes, p.fs_id.is_some())) != Ok((2, 7, true))
+        || found != (Ok(b"one".to_vec()), Ok(b"two!".to_vec()))
+        || written
+    {
         return Err(fail(
             "two files were not placed as given, or a third could be written beside them",
         ));

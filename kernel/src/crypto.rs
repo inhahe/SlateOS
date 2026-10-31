@@ -43,7 +43,10 @@ pub fn wipe(bytes: &mut [u8]) {
 
 /// Key material, wiped when it is dropped ([`wipe`]). Its bytes are `.0`;
 /// a copy of them made elsewhere is that holder's to wipe, or to hold in a
-/// `Secret` of its own.
+/// `Secret` of its own. One that is stored, or moved, is boxed and filled
+/// in place: a move copies its bytes and leaves the old ones unwiped -- in
+/// a map's node, a vector's old buffer, a stack frame -- while moving a box
+/// moves only the pointer.
 pub struct Secret<const N: usize>(pub [u8; N]);
 
 impl<const N: usize> Secret<N> {

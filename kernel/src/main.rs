@@ -4102,6 +4102,15 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || fs::vfs::self_test_mount_tree(),
     );
+    // A filesystem detached by identity from every table it is in
+    // (`Vfs::detach_filesystem`, what the WiFi files' drop uses), on mounts
+    // made under /tmp.
+    // RAN-IF: "[vfs] Running detach-by-identity self-test..."
+    selftest::dispatch_debug(
+        "VFS detach by identity",
+        selftest::Severity::Diagnostic,
+        || fs::vfs::self_test_detach_filesystem(),
+    );
     // The pivot the boot makes to put the system image at `/` before init
     // (design-decisions §1513), tried on a tree under /tmp.
     // RAN-IF: "[vfs] Running pivot_root self-test..."

@@ -24,10 +24,11 @@ sealed memfs into that copy only, spawn the driver suspended
 namespace before it runs. No path from any other namespace then names the
 file, whatever capability the asker holds, and the namespace goes, the
 memfs with it (wiped as it drops), when the driver ends. What it needs
-first: namespace-taking forms of what the placing and its checks call in
-the caller's namespace today -- `trees::register`'s pin
-(`Vfs::resolve_path`, `Vfs::pin_dir`, `Vfs::filesystem_read_only`) and the
-drop's `Vfs::is_mount_point`, `Vfs::unmount_detach` and `Vfs::metadata`.
+first: namespace-taking forms of what the placing calls in the caller's
+namespace today -- the mount, and `trees::register`'s pin
+(`Vfs::resolve_path`, `Vfs::pin_dir`, `Vfs::filesystem_read_only`). The
+drop already detaches the filesystem by its identity from every
+namespace (`Vfs::detach_filesystem`), and needs nothing new.
 
 Trigger: a WiFi join outside the boot's self-tests -- a driver that serves
 WiFi for the system's life and joins at boot or rejoins a lost link

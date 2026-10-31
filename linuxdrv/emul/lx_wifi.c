@@ -1813,9 +1813,9 @@ static void lx_wifi_station_free(struct lx_wifi_station *st)
 }
 
 /*
- * The access point's frames taken (lx_wifi_authenticator) until `*done`,
- * within LX_WIFI_HANDSHAKE_S: 0, or why not, said -- `what` what was
- * awaited.
+ * The access point's frames handed to `take` until `*done`, within
+ * LX_WIFI_HANDSHAKE_S: 0, `take`'s error, or -ETIMEDOUT, said -- `what`
+ * what was awaited.
  */
 static int lx_wifi_ap_take_by(struct lx_wifi_handshaking *h, struct lx_wifi_eapol *at_ap,
 			      wait_queue_head_t *wq,
@@ -1829,6 +1829,7 @@ static int lx_wifi_ap_take_by(struct lx_wifi_handshaking *h, struct lx_wifi_eapo
 	return err;
 }
 
+/* lx_wifi_ap_take_by, the frames taken by the access point's authenticator (lx_wifi_authenticator). */
 static int lx_wifi_ap_take(struct lx_wifi_handshaking *h, struct lx_wifi_eapol *at_ap,
 			   wait_queue_head_t *wq, const bool *done, const char *what)
 {

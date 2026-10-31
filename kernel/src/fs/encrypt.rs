@@ -118,10 +118,11 @@ fn generate_nonce() -> KernelResult<[u8; NONCE_SIZE]> {
 // Types
 // ---------------------------------------------------------------------------
 
-/// A named encryption key, wiped as the entry goes.
+/// A named encryption key, wiped as the entry goes -- boxed, so that the map
+/// moving entries about moves only the pointer ([`crate::crypto::Secret`]).
 struct KeyEntry {
     name: String,
-    key: crate::crypto::Secret<KEY_SIZE>,
+    key: alloc::boxed::Box<crate::crypto::Secret<KEY_SIZE>>,
 }
 
 /// Public info about a stored key.
@@ -205,7 +206,7 @@ pub fn add_raw_key(name: &str, key: [u8; KEY_SIZE]) -> KernelResult<()> {
         String::from(name),
         KeyEntry {
             name: String::from(name),
-            key: crate::crypto::Secret(key),
+            key: alloc::boxed::Box::new(crate::crypto::Secret(key)),
         },
     );
 
@@ -390,14 +391,19 @@ pub fn stats() -> (u64, u64, usize) {
 // ---------------------------------------------------------------------------
 
 /// Derive a key from passphrase and salt.
-fn derive_key(passphrase: &str, salt: &str) -> crate::crypto::Secret<KEY_SIZE> {
+// Boxed on purpose: filled in place, the key is never moved, so no copy of
+// it is left behind ([`crate::crypto::Secret`]).
+#[allow(clippy::unnecessary_box_returns)]
+fn derive_key(passphrase: &str, salt: &str) -> alloc::boxed::Box<crate::crypto::Secret<KEY_SIZE>> {
     use crate::crypto::Sha256;
 
     let mut hasher = Sha256::new();
     hasher.update(passphrase.as_bytes());
     hasher.update(salt.as_bytes());
     hasher.update(b"FENC_KDF_V1");
-    crate::crypto::Secret(hasher.finalize())
+    let mut key = alloc::boxed::Box::new(crate::crypto::Secret::<KEY_SIZE>::zeroed());
+    key.0 = hasher.finalize();
+    key
 }
 
 /// Constant-time byte array comparison (prevents timing attacks).

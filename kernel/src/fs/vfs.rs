@@ -1866,6 +1866,16 @@ fn finish_unmount(mp: MountPoint) {
     super::perfile::filesystem_unmounted(mp.fs_id);
 }
 
+/// [`finish_unmount`], saying nothing of an entry whose filesystem another
+/// entry still has: whether it was finished.
+fn finish_unmount_unless_mounted(mp: MountPoint) -> bool {
+    if VFS.lock().every().any(|m| m.fs_id == mp.fs_id) {
+        return false;
+    }
+    finish_unmount(mp);
+    true
+}
+
 /// `ReadOnlyFilesystem` if mount table entry `mnt_id` is read-only now,
 /// `NotFound` if it has gone: what can change under a file opened for
 /// writing.
@@ -3039,6 +3049,30 @@ impl Vfs {
             options,
             false,
         )
+        .map(|_| ())
+    }
+
+    /// [`Self::mount_with_options`], answering the mounted filesystem's
+    /// identity -- its `fs_id`, as a [`FileId`] carries it -- for a mount to
+    /// be taken down by what it is rather than where it is
+    /// ([`Self::detach_filesystem`]): taken from the mount itself, not from a
+    /// lookup after it, which another mount could have covered meanwhile.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mount_with_options`].
+    pub fn mount_with_options_id(
+        mount_path: impl AsRef<Path>,
+        fs: Box<dyn FileSystem>,
+        options: MountOptions,
+    ) -> KernelResult<u64> {
+        Self::mount_with_options_in(
+            super::mntns::current(),
+            mount_path.as_ref(),
+            fs,
+            options,
+            false,
+        )
     }
 
     /// [`Self::mount_with_options`], on top of whatever is mounted at
@@ -3064,6 +3098,7 @@ impl Vfs {
             options,
             true,
         )
+        .map(|_| ())
     }
 
     /// [`Self::mount`] into mount namespace `ns`'s table.
@@ -3077,6 +3112,7 @@ impl Vfs {
         fs: Box<dyn FileSystem>,
     ) -> KernelResult<()> {
         Self::mount_with_options_in(ns, mount_path.as_ref(), fs, MountOptions::defaults(), false)
+            .map(|_| ())
     }
 
     /// [`Self::mount_with_options`] into mount namespace `ns`'s table: on top
@@ -3088,7 +3124,7 @@ impl Vfs {
         fs: Box<dyn FileSystem>,
         options: MountOptions,
         on_top: bool,
-    ) -> KernelResult<()> {
+    ) -> KernelResult<u64> {
         if !mount_path.is_absolute() {
             return Err(KernelError::InvalidArgument);
         }
@@ -3210,7 +3246,7 @@ impl Vfs {
             super::deferred_ops::replay_on_mount(&mounted_path);
         }
 
-        Ok(())
+        Ok(fs_id)
     }
 
     /// Give mount namespace `to` a copy of `from`'s table: the same
@@ -3271,8 +3307,18 @@ impl Vfs {
             now
         };
         VFS_DCACHE.lock().invalidate_all();
+        // A namespace's table is mostly copies of mounts still in others:
+        // those are said once, in sum, not one line each.
+        let mut elsewhere = 0usize;
         for mp in now {
-            finish_unmount(mp);
+            if !finish_unmount_unless_mounted(mp) {
+                elsewhere = elsewhere.saturating_add(1);
+            }
+        }
+        if elsewhere > 0 {
+            crate::serial_println!(
+                "[vfs] Mount namespace {id}'s table dropped: {elsewhere} of its mount(s) stay mounted elsewhere"
+            );
         }
     }
 
@@ -3480,11 +3526,22 @@ impl Vfs {
     /// keeps it reachable. The files held open on it go on working until
     /// released, as for [`Self::unmount_detach`]. How many mounts were
     /// detached, those beneath counted.
-    pub fn detach_filesystem(fs_id: u64) -> usize {
+    ///
+    /// # Errors
+    ///
+    /// `PermissionDenied`, nothing detached, when `fs_id` is a table's root:
+    /// the whole table would go with it.
+    pub fn detach_filesystem(fs_id: u64) -> KernelResult<usize> {
         let (now, detached) = {
             let mut vfs = VFS.lock();
             let mut gone = Vec::new();
             let inner = &mut *vfs;
+            let mut roots = core::iter::once(&inner.root)
+                .chain(inner.others.values())
+                .filter_map(|table| root_index(table).and_then(|i| table.get(i)));
+            if roots.any(|m| m.fs_id == fs_id) {
+                return Err(KernelError::PermissionDenied);
+            }
             for table in core::iter::once(&mut inner.root).chain(inner.others.values_mut()) {
                 let before = gone.len();
                 while let Some(top) = table.iter().position(|m| m.fs_id == fs_id) {
@@ -3504,10 +3561,18 @@ impl Vfs {
         if detached > 0 {
             VFS_DCACHE.lock().invalidate_all();
         }
+        // Each filesystem finished once: its entries all left the tables
+        // together, so the first finish finds none of them left -- or one
+        // still held, which finishes it at its last hold -- and the rest have
+        // nothing to add but their own drop.
+        let mut finished: Vec<u64> = Vec::new();
         for mp in now {
-            finish_unmount(mp);
+            if !finished.contains(&mp.fs_id) {
+                finished.push(mp.fs_id);
+                finish_unmount(mp);
+            }
         }
-        detached
+        Ok(detached)
     }
 
     /// Whether the filesystem `fs_id` is mounted in any mount namespace's
@@ -10697,7 +10762,7 @@ fn flock_wait_rungs(a: u64, b: u64) -> KernelResult<()> {
 /// The design spec (CLAUDE.md) specifies 255 bytes.  This matches the
 /// Linux ext4 limit and is generous enough for any reasonable name while
 /// preventing denial-of-service via absurdly long names.
-const MAX_COMPONENT_LEN: usize = 255;
+pub const MAX_COMPONENT_LEN: usize = 255;
 
 /// Maximum number of path components [`Vfs::mkdir_all`] will create in one call.
 ///
@@ -17361,6 +17426,184 @@ pub fn self_test_mount_tree() -> KernelResult<()> {
             Err(KernelError::InternalError)
         }
     }
+}
+
+/// [`Vfs::detach_filesystem`] and [`Vfs::filesystem_mounted`] on mounts
+/// made for the test under `/tmp`. A memfs is mounted, bind-mounted beside
+/// itself, a file of it held open, another memfs stacked on it, and the
+/// table copied into a new namespace's: one detach takes all six entries,
+/// the filesystem is mounted nowhere, its paths name nothing, and the held
+/// file still reads. A second memfs holding a symbolic link out of it, a
+/// path through the link resolved first so that the dentry cache keeps it,
+/// is detached the same way, and the path names nothing after. A table's
+/// root is refused, nothing detached. Skipped, and said,
+/// where `/tmp` is not mounted.
+///
+/// # Errors
+///
+/// `InternalError`, said, for anything not so.
+pub fn self_test_detach_filesystem() -> KernelResult<()> {
+    crate::serial_println!("[vfs] Running detach-by-identity self-test...");
+    if !Vfs::is_mount_point("/tmp") {
+        crate::serial_println!("[vfs]   detach by identity: skipped, /tmp is not mounted");
+        return Ok(());
+    }
+    let result = detach_filesystem_test_body();
+    // Whatever the body left mounted, taken down.
+    for path in DETACH_TEST_PATHS {
+        for _ in 0..4 {
+            if !Vfs::is_mount_point(path) || Vfs::unmount_detach(path).is_err() {
+                break;
+            }
+        }
+    }
+    match result {
+        Ok(()) => {
+            crate::serial_println!(
+                "[vfs]   detach by identity: a filesystem bind-mounted, stacked on, held open and copied into a namespace detached from everywhere at once, the held file still read; the dentry cache emptied of it; a table's root refused: OK"
+            );
+            Ok(())
+        }
+        Err(failed) => {
+            for what in failed {
+                crate::serial_println!("[vfs]   FAIL: detach by identity: {}", what);
+            }
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// Where [`self_test_detach_filesystem`] mounts: the memfs, its bind mount,
+/// and the second memfs.
+const DETACH_TEST_PATHS: [&str; 3] = [
+    "/tmp/vfs-detach-b",
+    "/tmp/vfs-detach-a",
+    "/tmp/vfs-detach-c",
+];
+
+/// [`self_test_detach_filesystem`]'s body.
+fn detach_filesystem_test_body() -> Result<(), Vec<&'static str>> {
+    let failed: Vec<&'static str> = [
+        detach_test_everywhere(),
+        detach_test_cache(),
+        detach_test_root(),
+    ]
+    .into_iter()
+    .filter_map(Result::err)
+    .collect();
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed)
+    }
+}
+
+/// [`self_test_detach_filesystem`]'s first part: a memfs mounted,
+/// bind-mounted beside itself, a file of it held open, another memfs stacked
+/// on it, the table copied into a new namespace's -- all six entries taken
+/// by one detach, the filesystem mounted nowhere, its paths naming nothing,
+/// the held file still read.
+fn detach_test_everywhere() -> Result<(), &'static str> {
+    let [b, a, _] = DETACH_TEST_PATHS;
+    for path in [a, b] {
+        Vfs::mkdir_all(path).map_err(|_| "a mount point under /tmp could not be made")?;
+    }
+    let mut fs = super::memfs::MemFs::new();
+    fs.write_file(Path::new("/f"), b"held")
+        .map_err(|_| "a file could not be written to a new memfs")?;
+    let fs_id = Vfs::mount_with_options_id(a, Box::new(fs), MountOptions::defaults())
+        .map_err(|_| "a memfs could not be mounted")?;
+    Vfs::bind_mount(a, b, false).map_err(|_| "it could not be bind-mounted beside itself")?;
+    let held_path = PathBuf::from("/tmp/vfs-detach-b/f");
+    let hold = Vfs::open_object(&held_path)
+        .ok()
+        .flatten()
+        .ok_or("a file on it could not be held")?;
+    Vfs::mount_on_top(
+        a,
+        Box::new(super::memfs::MemFs::new()),
+        MountOptions::defaults(),
+    )
+    .map_err(|_| "a memfs could not be stacked on it")?;
+    let ns =
+        super::mntns::create_from(super::mntns::ROOT).map_err(|_| "no namespace could be made")?;
+    let detached = Vfs::detach_filesystem(fs_id);
+    let after = (
+        Vfs::filesystem_mounted(fs_id),
+        Vfs::metadata("/tmp/vfs-detach-b/f").map(|m| m.size),
+        Vfs::is_mount_point(a),
+        Vfs::is_mount_point(b),
+        Vfs::object_read(&hold, &held_path, 0, 4),
+    );
+    super::mntns::release(ns);
+    drop(hold);
+    match (detached, after) {
+        (Ok(6), (false, Err(KernelError::NotFound), false, false, Ok(read))) if read == b"held" => {
+            Ok(())
+        }
+        (Ok(6), _) => Err(
+            "after the detach the filesystem was still mounted, a path to it named its file, a mount of it was left, or the held file did not read",
+        ),
+        _ => Err(
+            "the detach did not take the six entries -- the memfs, its bind mount and the mount stacked on it, in two tables -- or was refused",
+        ),
+    }
+}
+
+/// [`self_test_detach_filesystem`]'s second part: a memfs holding a
+/// symbolic link to a file outside it, a path through the link resolved
+/// first, so that the dentry cache keeps where it led, then the memfs
+/// detached -- the path through the link naming nothing after, as it would
+/// not if the cache still sent it to the file.
+fn detach_test_cache() -> Result<(), &'static str> {
+    let [_, _, c] = DETACH_TEST_PATHS;
+    Vfs::mkdir_all(c).map_err(|_| "a mount point under /tmp could not be made")?;
+    Vfs::mkdir_all(DETACH_TEST_TARGET).map_err(|_| "a directory under /tmp could not be made")?;
+    Vfs::write_file("/tmp/vfs-detach-target/f", b"reached")
+        .map_err(|_| "a file under /tmp could not be written")?;
+    let mut fs = super::memfs::MemFs::new();
+    fs.symlink(Path::new("/link"), Path::new(DETACH_TEST_TARGET))
+        .map_err(|_| "a symbolic link could not be made in a second memfs")?;
+    let fs_id = Vfs::mount_with_options_id(c, Box::new(fs), MountOptions::defaults())
+        .map_err(|_| "a second memfs could not be mounted")?;
+    let through = "/tmp/vfs-detach-c/link/f";
+    let seen = Vfs::metadata(through).is_ok();
+    let detached = Vfs::detach_filesystem(fs_id);
+    let after = Vfs::metadata(through);
+    // The file the link led to, taken away: the test's own.
+    let _cleanup = (
+        Vfs::remove("/tmp/vfs-detach-target/f"),
+        Vfs::rmdir(DETACH_TEST_TARGET),
+    );
+    if !seen {
+        return Err("a path through a symbolic link on a mounted memfs did not reach its target");
+    }
+    if detached != Ok(1) || !matches!(after, Err(KernelError::NotFound)) {
+        return Err(
+            "a path through a symbolic link on a detached filesystem still reached its target: the dentry cache kept it",
+        );
+    }
+    Ok(())
+}
+
+/// Where [`detach_test_cache`]'s symbolic link leads: a directory under
+/// `/tmp`, not on the filesystem detached.
+const DETACH_TEST_TARGET: &str = "/tmp/vfs-detach-target";
+
+/// [`self_test_detach_filesystem`]'s third part: a table's root refused,
+/// nothing detached.
+fn detach_test_root() -> Result<(), &'static str> {
+    let root_id = Vfs::pin_dir("/")
+        .ok()
+        .and_then(|pinned| pinned.id)
+        .map(|id| id.fs_id)
+        .ok_or("the root has no identity to try")?;
+    if Vfs::detach_filesystem(root_id) != Err(KernelError::PermissionDenied)
+        || !Vfs::filesystem_mounted(root_id)
+    {
+        return Err("a table's root was detached");
+    }
+    Ok(())
 }
 
 /// [`self_test_mount_tree`]'s body.

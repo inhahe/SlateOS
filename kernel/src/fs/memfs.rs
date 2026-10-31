@@ -1034,9 +1034,9 @@ impl MemFs {
     ///
     /// # Errors
     ///
-    /// `InvalidArgument` for a path no lookup could name
-    /// ([`crate::fs::vfs::validate_path`]: a component over 255 bytes, say),
-    /// or what a directory or a write refuses -- a file named as another's
+    /// `InvalidArgument` for a path [`crate::fs::vfs::validate_path`]
+    /// refuses (a component over 255 bytes, which no lookup could open), or
+    /// what a directory or a write refuses -- a file named as another's
     /// directory. The filesystem is dropped with what it held, wiped if
     /// `wipe`.
     fn holding(files: &[(&Path, &[u8])], wipe: bool) -> KernelResult<Self> {
@@ -2563,17 +2563,18 @@ pub fn mount<P: AsRef<crate::fs::path::Path> + ?Sized>(mount_path: &P) -> Kernel
 /// changed. `wipe`: their contents zeroed when the filesystem is dropped,
 /// once it is unmounted and nothing holds it -- which is then all they ever
 /// were, since a file written once and never changed has freed none
-/// before.
+/// before. The filesystem's identity
+/// ([`crate::fs::Vfs::mount_with_options_id`]), to detach it by.
 ///
 /// # Errors
 ///
 /// [`MemFs::holding`]'s, or the mount's ([`crate::fs::Vfs::mount`]):
 /// nothing is mounted then.
-pub fn mount_sealed(mount_path: &Path, files: &[(&Path, &[u8])], wipe: bool) -> KernelResult<()> {
+pub fn mount_sealed(mount_path: &Path, files: &[(&Path, &[u8])], wipe: bool) -> KernelResult<u64> {
     let fs = MemFs::holding(files, wipe)?;
     let mut options = crate::fs::vfs::MountOptions::defaults();
     options.read_only = true;
-    crate::fs::Vfs::mount_with_options(mount_path, Box::new(fs), options)
+    crate::fs::Vfs::mount_with_options_id(mount_path, Box::new(fs), options)
 }
 
 /// [`MemFs::wipe_contents`], which a filesystem that wipes runs as it is

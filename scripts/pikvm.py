@@ -15,10 +15,11 @@ USB drive, and works its power button. This script is how a session drives it:
 `boot` shuts a PC that is on down first, with a press of its power button,
 and goes on once the power light is out. A press shuts Windows down
 properly (Windows' power button setting, since 2026-10-31). It stops
-SlateOS too, but by the firmware powering the PC off: the kernel handles no
-power-button event yet (known-issues A-THE-POWER-BUTTON-NEVER-REACHES-THE-KERNEL),
-so SlateOS is cut off as by a power cut, which loses nothing, since it may
-write only the spare disk. `--off-hard` cuts the power at once (the button
+SlateOS too, which handles no power-button event yet, most likely by the
+firmware powering the PC off (known-issues
+A-THE-POWER-BUTTON-NEVER-REACHES-THE-KERNEL, which says what is not yet
+explained): a power cut as far as SlateOS knows, which loses nothing, since
+it may write only the spare disk. `--off-hard` cuts the power at once (the button
 held down), for a PC a press does not stop -- never for Windows, which
 would lose what is open.
 
@@ -611,8 +612,9 @@ OFF_HARD_SECONDS = 15
 def shut_down(kvm, off_hard: bool, wait_s: float = SHUTDOWN_SECONDS) -> None:
     """The PC off, before `boot` starts it again: nothing when it is off
     already. Else its power button pressed -- which shuts Windows down
-    properly (its power button setting), and has the firmware power the PC
-    off under SlateOS, which handles no power-button event yet -- and
+    properly (its power button setting), and stops SlateOS too, most likely
+    by the firmware powering the PC off, since SlateOS handles no
+    power-button event yet -- and
     `wait_s` given for the power light to go out; or, `off_hard`, the button
     held down, which cuts the power at once, for a PC a press does not stop,
     never for Windows. Exits, the PC left on, when the light stays on: a PC

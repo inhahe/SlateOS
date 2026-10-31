@@ -3,11 +3,20 @@
 **Status:** OPEN
 
 **In short:** pressing a PC's power button while SlateOS runs does not ask
-SlateOS to shut down. On the test PC the press still turns the machine off
-(the operator saw it, 2026-10-31), but it is the firmware doing that, as a
-power cut: no program is told, nothing is saved, no filesystem is
-synced. Under a SlateOS that could write its disks, that is the
-"unexpected power loss" every filesystem journal exists for.
+SlateOS to shut down: no kernel code handles the press. On the test PC a
+short press still turns the machine off (the operator saw it, 2026-10-31),
+most likely the firmware doing it as a power cut: no program is told,
+nothing is saved, no filesystem is synced. Under a SlateOS that could write
+its disks, that is the "unexpected power loss" every filesystem journal
+exists for.
+
+**Not yet explained:** the operator saw new lines appear in SlateOS's
+on-screen log well within half a second of the press, just before the
+power went. A firmware power cut would print nothing first, so something
+in SlateOS may notice the press. The first step of the fix settles it: log
+at boot whether the firmware handed the chipset over in ACPI mode (`SCI_EN`
+in PM1 control), and record the PiKVM's video at its full frame rate
+across a press, to read those lines.
 
 **Where.** The pieces exist but nothing joins them:
 - `kernel/src/acpi/fadt.rs` parses the FADT -- `sci_interrupt`, `smi_cmd`,

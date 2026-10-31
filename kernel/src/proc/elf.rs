@@ -26109,19 +26109,8 @@ pub fn build_open_probe_elf(
     flags: u32,
     arg3: u32,
 ) -> alloc::vec::Vec<u8> {
-    const SYS_EXIT: u32 = 1;
     /// `KernelError::PermissionDenied` as it arrives in `rax`.
     const PERMISSION_DENIED: i32 = -400;
-
-    /// `mov edi, imm32; mov eax, SYS_EXIT; syscall` -- 12 bytes, fixed width,
-    /// which is what lets the jumps above each one use a known rel8.
-    fn exit_with(code: &mut alloc::vec::Vec<u8>, v: u32) {
-        code.push(0xBF);
-        code.extend_from_slice(&v.to_le_bytes());
-        code.push(0xB8);
-        code.extend_from_slice(&SYS_EXIT.to_le_bytes());
-        code.extend_from_slice(&[0x0F, 0x05]);
-    }
 
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
@@ -26140,17 +26129,16 @@ pub fn build_open_probe_elf(
     code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
     code.extend_from_slice(&[0x78, 0x00]); // js .refused
     let js_refused = code.len() - 1;
-    exit_with(&mut code, 0);
+    emit_exit(&mut code, 0);
     code[js_refused] = (code.len() - (js_refused + 1)) as u8;
 
     code.extend_from_slice(&[0x48, 0x3D]); // cmp rax, imm32 (sign-extended)
     code.extend_from_slice(&PERMISSION_DENIED.to_le_bytes());
     code.extend_from_slice(&[0x74, 0x00]); // je .denied
     let je_denied = code.len() - 1;
-    exit_with(&mut code, 2);
+    emit_exit(&mut code, 2);
     code[je_denied] = (code.len() - (je_denied + 1)) as u8;
-    exit_with(&mut code, 1);
-    code.push(0xCC); // int3 -- unreachable
+    emit_exit(&mut code, 1);
 
     // The path after the code, in the one segment code_elf maps.
     let path_vaddr = CODE_ELF_LOAD_VADDR + code.len() as u64;
@@ -26197,7 +26185,8 @@ pub fn build_linux_fifo_reopen_probe_elf(fifo_nul: &[u8]) -> alloc::vec::Vec<u8>
     const MINUS_EACCES: u8 = 0xF3;
     const REOPEN: &[u8] = b"/proc/self/fd/9\0";
 
-    /// `mov edi, imm32; mov eax, SYS_EXIT; syscall` -- 12 bytes.
+    /// `exit(v)` by Linux's number, which the native `emit_exit` does not
+    /// use: `mov edi, imm32; mov eax, SYS_EXIT; syscall`.
     fn exit_with(code: &mut alloc::vec::Vec<u8>, v: u32) {
         code.push(0xBF);
         code.extend_from_slice(&v.to_le_bytes());

@@ -45,15 +45,18 @@ roadmap 2.1), it must not be started with the unconfined right.
   firmware-loading driver process is given trees for `/.boot-firmware` and
   `/lib/firmware` in place of the `File` capability
   (`linuxdrv::firmware_reading`).
-- **A tree is fixed.** Its directory must be on a read-only filesystem -- no
-  hard link can be planted in it, no file changed under it -- and it is
-  pinned to the directory's filesystem and inode, checked on every open: a
-  filesystem mounted over the path, or another directory put there, is not
-  the tree, which then reads nothing. The first review of this fix found
-  the tree escapable through exactly those (a root driver mounting over
-  `/lib/firmware`, a link planted in a writable directory).
+- **A tree is fixed.** Its directory must be on a filesystem read-only as a
+  whole -- not a read-only bind of a writable one -- so no hard link can be
+  planted in it nor file changed under it, named as a walk finds it, and
+  pinned to the directory's filesystem and inode. Every open checks that
+  again as the caller resolves the path, through its namespace: a
+  filesystem mounted over it, a link or a binding on its way, or the
+  filesystem made writable, leaves the tree reading nothing; and a file the
+  walk opens must be on the tree's own filesystem, not one mounted beneath
+  it. The first two reviews of this fix found the tree escapable through
+  each of those in turn.
 - **Driver processes are not root.** `linuxdrv::start` runs each as
-  `DRIVER_UID` (65533), and refuses one that comes out root: it cannot
+  `DRIVER_UID` (65533), and refuses one with a root id of any kind: it cannot
   mount, set the clock or reconfigure an interface, and what it may do is
   the capabilities it is given (lane D asked to reserve the number:
   `requests/a-d-reserve-uid-65533-for-linux-driver-processes.md`).

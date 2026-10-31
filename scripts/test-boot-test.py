@@ -1790,7 +1790,7 @@ _CARD_BOOT_SETTINGS = ("CARD_BOOT_DRIVER", "CARD_BOOT_BDF", "CARD_BOOT_SUBNET",
                        "CARD_BOOT_NETDEV", "CARD_BOOT_SERVICE", "CARD_BOOT_WORDS",
                        "CARD_BOOT_CLOSING", "CARD_BOOT_DONE", "CARD_BOOT_SERVED",
                        "CARD_BOOT_LEASED", "CARD_BOOT_WAITING", "CARD_BOOT_NO_DAEMON",
-                       "CARD_BOOT_PANICS", "CARD_BOOT_UPSTREAM", "KERNEL_DEATH_RE",
+                       "CARD_BOOT_PANIC_RE", "CARD_BOOT_UPSTREAM", "KERNEL_DEATH_RE",
                        "LIVENESS_FAILURE_RE")
 
 
@@ -1941,6 +1941,15 @@ def test_the_card_boot_passes_only_a_daemon_that_served_the_card_on_its_own_netw
         ("a driver process's Rust half panicking fails",
          "[boot] up\n" + _SERVED + _LEASED + "[lx] the layer's Rust half panicked\n" + _TOLD
          + _DONE, None, ("a check failed", "[lx] the layer's Rust half panicked")),
+        ("a capstone client panicking fails",
+         "[boot] up\n" + _SERVED + _LEASED + "[httpget] PANIC\n" + _TOLD + _DONE, None,
+         ("a check failed", "[httpget] PANIC")),
+        ("a service panicking fails",
+         "[boot] up\n" + _SERVED + _LEASED + "!!! PANIC in init process !!!\n" + _TOLD + _DONE,
+         None, ("a check failed", "!!! PANIC in init process !!!")),
+        ("a Rust program's own panic fails",
+         "[boot] up\n" + _SERVED + _LEASED + "thread 'main' panicked at src/main.rs:1:1:\n"
+         + _TOLD + _DONE, None, ("a check failed", "thread 'main' panicked at src/main.rs:1:1:")),
         ("a line that only mentions a panic passes",
          "[boot] up\n" + _SERVED + _LEASED + "[proc] panic=0: no reboot on a PANIC\n"
          + "[spawn] a child that panicked was reaped\n" + _TOLD + _DONE, None, ("", "")),
@@ -2014,6 +2023,7 @@ def _card_cable(body):
                 + _card_boot_settings()
                 + "CARD_SERIAL=serial.txt\nSCRIPT_DIR=.\nMONITOR_PORT=1\nCABLE_PY=bash\n"
                 "CARD_BOOT_CABLE=0\nCARD_BOOT_PULLED=\nCARD_BOOT_PULL_FAILED=\n"
+                "CARD_BOOT_PULL_BACKOFF=1\nCARD_BOOT_PULL_WAIT=0\n"
                 + extract_shell_function("card_boot_cable_step") + "\n\n"
                 "step() { card_boot_cable_step 2>>errors.txt; "
                 "echo \"cable=$CARD_BOOT_CABLE pulled=$CARD_BOOT_PULLED\"; }\n"
@@ -2039,8 +2049,10 @@ def test_the_card_boots_cable_is_pulled_first_and_plugged_in_when_the_daemon_wai
     served = _card_boot_value("CARD_BOOT_SERVED") + " (pid 10)\n"
     out = _card_cable(
         "echo 2 > rc.txt\n"
-        "step\n"                      # the pull refused: tried again
+        "step\n"                      # the pull refused: tried again after 2 steps
         "echo 0 > rc.txt\n"
+        "step\n"                      # waiting
+        "step\n"                      # waiting
         "step\n"                      # pulled
         "printf '[boot] up\\n' > serial.txt\n"
         "step\n"                      # the daemon not yet waiting: nothing
@@ -2058,12 +2070,11 @@ def test_the_card_boots_cable_is_pulled_first_and_plugged_in_when_the_daemon_wai
     check("the cable step ran to its end", out is not None, True)
     if out is not None:
         lines = out.splitlines()
-        check("its states: refused, pulled, waiting for the daemon's second wait, "
-              "refused, plugged in",
+        check("its states: refused, waiting out the backoff, pulled, waiting for the "
+              "daemon's second wait, refused, plugged in",
               [line for line in lines if line.startswith("cable=")],
-              ["cable=0 pulled=", "cable=1 pulled=pulled", "cable=1 pulled=pulled",
-               "cable=1 pulled=pulled", "cable=1 pulled=pulled", "cable=2 pulled=pulled",
-               "cable=2 pulled=pulled"])
+              ["cable=0 pulled="] * 3
+              + ["cable=1 pulled=pulled"] * 4 + ["cable=2 pulled=pulled"] * 2)
         calls = lines[lines.index("calls:") + 1:] if "calls:" in lines else []
         check("set_link off twice (once refused), on twice (once refused), nothing else",
               [line for line in calls if line.startswith("hmp ")],
@@ -2078,14 +2089,17 @@ def test_the_card_boots_cable_is_pulled_first_and_plugged_in_when_the_daemon_wai
                     "not pulled before the driver started" in late,
                     "not-called" in late),
           (["cable=2 pulled="], True, True))
-    refused = _card_cable("echo 2 > rc.txt\nstep\nstep\nstep\n"
-                          + f"printf '%s' {_sq(served)} > serial.txt\nstep\n")
-    check("a pull refused is tried each step until the driver starts, then given up, "
-          "said with QEMU's last answer",
+    refused = _card_cable("echo 2 > rc.txt\n" + "step\n" * 40
+                          + f"printf '%s' {_sq(served)} > serial.txt\nstep\n"
+                          + "echo calls: $(grep -c 'set_link' calls.txt)\n")
+    check("a pull refused is tried again, ever less often, until the driver starts, "
+          "then given up, said with QEMU's last answer",
           refused and ([l for l in refused.splitlines() if l.startswith("cable=")],
                        "not pulled before the driver started (the monitor last answered "
-                       "rc 2: QEMU said no)" in refused),
-          (["cable=0 pulled="] * 3 + ["cable=2 pulled="], True))
+                       "rc 2: QEMU said no)" in refused,
+                       # Steps 1, 4, 9, 18 and 35: waits of 2, 4, 8 and 16 between.
+                       "calls: 5" in refused),
+          (["cable=0 pulled="] * 40 + ["cable=2 pulled="], True, True))
 
 
 def _limine_conf(cmdline, template):
@@ -2227,11 +2241,25 @@ def test_every_line_the_card_boot_reads_is_printed_by_the_tree():
     check("there are upstream proofs", len(upstream) >= 3, True)
     for proof in upstream:
         check(f"the kernel prints the upstream proof {proof!r}", proof in spawn, True)
-    kit = source("linuxdrv", "kit", "src", "sys.rs")
-    check("the daemon's and the driver layer's panic handlers print the panics read",
-          _card_boot_value("CARD_BOOT_PANICS").splitlines(),
-          [line for line in ("!!! PANIC in netstack !!!", "[lx] the layer's Rust half panicked")
-           if line + "\\n" in daemon + kit])
+    # Every banner a panic handler in the tree prints -- the line a
+    # `#[panic_handler]` body prints first -- is a panic to the card boot,
+    # and a line that only mentions one is not.
+    panic_re = re.compile(_card_boot_value("CARD_BOOT_PANIC_RE"))
+    banners = []
+    for listed in subprocess.run(["git", "ls-files", "*.rs"], cwd=REPO_ROOT, capture_output=True,
+                                 text=True, encoding="utf-8", check=True).stdout.split():
+        text = source(*listed.split("/"))
+        for handler in re.finditer(r"#\[panic_handler\]\s*\n[^{]*\{(.{0,400})", text, re.S):
+            said = re.search(r'(?:print|log)\(b?"([^"]+?)(?:\\n)?"\)', handler.group(1))
+            if said:
+                banners.append(said.group(1))
+    check("there are panic banners in the tree to read", len(banners) >= 5, True)
+    for banner in banners:
+        check(f"the card boot reads the panic banner {banner!r} as a panic",
+              bool(panic_re.search(banner)), True)
+    for mention in ("[proc] panic=0: no reboot on a PANIC", "[spawn] a child that panicked was reaped"):
+        check(f"the card boot does not read {mention!r} as a panic",
+              bool(panic_re.search(mention)), False)
 
 
 def test_a_watchdog_breadcrumb_is_not_the_boots_own_output():

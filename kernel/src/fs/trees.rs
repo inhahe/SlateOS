@@ -9,13 +9,18 @@
 //! so that neither `..` nor a symbolic link leads out.
 //!
 //! A tree is only as narrow as its directory is fixed, so a directory must
-//! be on a read-only filesystem to be one -- the boot medium's firmware is,
-//! sealed once placed. A writable one is not: with no file permissions to
-//! stop it, anyone who may write there could link any file into it, or put a
-//! symbolic link where the directory was. And a tree is pinned to the
-//! directory it was registered on -- its filesystem and its inode -- which
-//! every lookup checks again ([`beneath`]): a filesystem mounted over the
-//! path later is another directory, and the tree reads nothing there.
+//! be on a filesystem that is read-only as a whole to be one -- not merely
+//! through one mount of it -- as the boot medium's firmware is, sealed once
+//! placed: with no file permissions to stop it, anyone who may write a
+//! filesystem could link any file into a directory on it. A tree is pinned
+//! to the directory it was registered on -- its filesystem and its inode --
+//! and named as a walk finds it, through no symbolic link; every lookup
+//! ([`beneath`]) checks all of that again, as the caller sees the path, so
+//! that a filesystem mounted over it, a link or a namespace's binding put on
+//! its way, or the filesystem made writable, leaves the tree reading
+//! nothing. And what is opened through a tree must be on the tree's own
+//! filesystem ([`Route::dev`]): a filesystem mounted beneath it is not the
+//! tree.
 //!
 //! The directories are the kernel's, kept here: a capability names a tree by
 //! the id [`register`] gave it, never by a path or a hash of one that a
@@ -50,39 +55,61 @@ static TREES: Mutex<Vec<Tree>> = Mutex::new(Vec::new());
 /// could take.
 const MOST: usize = 64;
 
+/// Where a path lies in a tree ([`beneath`]): what `open_beneath` walks.
+pub struct Route {
+    /// The tree's directory.
+    pub base: PathBuf,
+    /// The rest of the path beneath it; empty for the directory itself.
+    pub rest: PathBuf,
+    /// The device number (`st_dev`) of the tree's filesystem, which a file
+    /// opened through the tree must have: one on another filesystem was
+    /// reached through a mount beneath the tree, which is not the tree.
+    pub dev: u32,
+}
+
 /// The id naming the directory `dir`, for a `FileTree` capability: the one
 /// it was given before, else a new one -- pinned either way to the
 /// directory there now.
 ///
 /// # Errors
 ///
-/// `InvalidArgument` for a `dir` that is not absolute or that holds a `.` or
-/// `..` component -- a tree is named as the walk will find it, so that
-/// [`beneath`] compares like with like; `NotFound` or `NotADirectory` for no
-/// directory there; `NotSupported` for one on a filesystem with no identity
-/// to pin it by; `PermissionDenied` for one on a writable filesystem;
-/// `OutOfMemory` when the table is full.
+/// `InvalidArgument` for a `dir` that is not absolute, holds a `.` or `..`
+/// component, or is not named as a walk finds it -- through a symbolic
+/// link, say -- so that [`beneath`] compares like with like; `NotFound` or
+/// `NotADirectory` for no directory there; `NotSupported` for one on a
+/// filesystem with no identity to pin it by; `PermissionDenied` for one on
+/// a filesystem that is not read-only as a whole; `OutOfMemory` when the
+/// table is full.
 pub fn register(dir: &Path) -> KernelResult<u64> {
-    let (dir, pinned) = pin(dir)?;
-    register_in(&mut TREES.lock(), dir, pinned, MOST)
-}
-
-/// `dir` named plainly -- absolute, every component a name, each separator
-/// once -- and pinned: what it is now, a directory on a read-only
-/// filesystem with an identity.
-fn pin(dir: &Path) -> KernelResult<(PathBuf, FileId)> {
     if !dir.is_absolute() || !dir.has_no_dot_components() {
         return Err(KernelError::InvalidArgument);
     }
+    let (dir, pinned) = pin(&plain(dir))?;
+    register_in(&mut TREES.lock(), dir, pinned, MOST)
+}
+
+/// `path`, absolute, named plainly: each separator once, and no `.`
+/// component -- the one spelling both [`register`] and [`beneath`] compare.
+fn plain(path: &Path) -> PathBuf {
     let mut plain = PathBuf::from("/");
-    for c in dir.components() {
+    for c in path.components().filter(|c| c.as_bytes() != b".") {
         plain.push(c);
     }
-    let pinned = Vfs::pin_dir(&plain)?.id.ok_or(KernelError::NotSupported)?;
-    if !Vfs::mount_options(&plain)?.read_only {
+    plain
+}
+
+/// The directory `dir`, named plainly, pinned: what it is now, as the
+/// caller sees it -- a directory, named as a walk finds it, on a filesystem
+/// read-only as a whole, with an identity.
+fn pin(dir: &Path) -> KernelResult<(PathBuf, FileId)> {
+    if Vfs::resolve_path(dir)?.as_path() != dir {
+        return Err(KernelError::InvalidArgument);
+    }
+    let pinned = Vfs::pin_dir(dir)?.id.ok_or(KernelError::NotSupported)?;
+    if !Vfs::filesystem_read_only(dir)? {
         return Err(KernelError::PermissionDenied);
     }
-    Ok((plain, pinned))
+    Ok((dir.to_path_buf(), pinned))
 }
 
 /// [`register`] on `trees`, holding at most `most`: the id `dir` has there,
@@ -114,38 +141,39 @@ fn register_in(
         .ok_or(KernelError::InternalError)
 }
 
-/// Where `path` lies in the tree `id` names: the tree's directory and the
-/// rest of `path` beneath it, for `open_beneath` to walk without leaving it;
-/// `None` when `id` names no tree, when its directory is no longer the one
-/// it was pinned on -- another filesystem mounted there, another directory
-/// put there, a filesystem no longer read-only -- or when `path`, which must
-/// be absolute, is not beneath it, component by component (`/ab` is not
-/// beneath `/a`; a `.` component is no component). The rest is empty for
-/// the directory itself.
+/// Where `path` lies in the tree `id` names ([`Route`]), as the calling
+/// process sees both; `None` when `id` names no tree, when `path`, which
+/// must be absolute, is not beneath its directory, component by component
+/// (`/ab` is not beneath `/a`; a `.` component is no component), or when
+/// the directory is no longer the one pinned, as the caller resolves it --
+/// another filesystem mounted there, another directory, a link or a
+/// namespace's binding put on its way, its filesystem no longer read-only.
 #[must_use]
-pub fn beneath(id: u64, path: &Path) -> Option<(PathBuf, PathBuf)> {
+pub fn beneath(id: u64, path: &Path) -> Option<Route> {
     let at = usize::try_from(id.checked_sub(1)?).ok()?;
     let tree = TREES.lock().get(at)?.clone();
     if !path.is_absolute() {
         return None;
     }
-    let mut plain = PathBuf::from("/");
-    for c in path.components().filter(|c| c.as_bytes() != b".") {
-        plain.push(c);
-    }
-    let rest = plain.strip_prefix(&tree.dir)?;
+    let rest = plain(path).strip_prefix(&tree.dir)?;
     match pin(&tree.dir) {
-        Ok((_, now)) if now == tree.pinned => Some((tree.dir, rest)),
+        Ok((_, now)) if now == tree.pinned => Some(Route {
+            base: tree.dir,
+            rest,
+            dev: crate::fs::vfs::dev_of(tree.pinned.fs_id),
+        }),
         _ => None,
     }
 }
 
 /// The registry at its edges: a directory registered again keeps its id; a
-/// relative one, one with `.` or `..` in it, one that is not there and one
-/// on a writable filesystem refused; the table's bound; and [`beneath`] --
-/// component by component, `.` passed over, absolute paths only, no tree
-/// for id 0, one never given, or one whose directory is no longer the one
-/// pinned.
+/// relative one, one with `.` or `..` in it, one reached through a symbolic
+/// link, one that is not there, one on a writable filesystem and one on a
+/// read-only bind mount of a writable filesystem refused; the table's
+/// bound; and [`beneath`] -- component by component, `.` passed over,
+/// absolute paths only, no tree for id 0 or one never given, its route
+/// carrying the tree's filesystem, and none once that filesystem is made
+/// writable or unmounted.
 ///
 /// # Errors
 ///
@@ -153,21 +181,35 @@ pub fn beneath(id: u64, path: &Path) -> Option<(PathBuf, PathBuf)> {
 /// fixture it could not make.
 pub fn self_test() -> KernelResult<()> {
     const ROOT: &str = "/.trees-test";
+    const WRITABLE: &str = "/.trees-test-rw";
+    const BOUND: &str = "/.trees-test/bound";
     let fail = |what: &str| {
         crate::serial_println!("[trees]   FAIL: {what}");
         KernelError::InternalError
     };
-    // A read-only filesystem of two directories, as the boot medium's
-    // firmware is placed.
+    let sealed = |read_only: bool| {
+        let mut options = Vfs::mount_options(ROOT)?;
+        options.read_only = read_only;
+        Vfs::remount(ROOT, options)
+    };
+    // A filesystem read-only as a whole, as the boot medium's firmware is
+    // placed; a writable one beside it, with a link into the first; and a
+    // read-only bind mount of the writable one.
     crate::fs::memfs::mount(ROOT)?;
-    let made = (|| {
+    let made = crate::fs::memfs::mount(WRITABLE).and_then(|()| {
         Vfs::mkdir_all(alloc::format!("{ROOT}/a/fw").as_str())?;
         Vfs::mkdir_all(alloc::format!("{ROOT}/b").as_str())?;
-        let mut options = Vfs::mount_options(ROOT)?;
+        Vfs::mkdir(BOUND)?;
+        Vfs::mkdir(alloc::format!("{WRITABLE}/d").as_str())?;
+        sealed(true)?;
+        Vfs::bind_mount(alloc::format!("{WRITABLE}/d").as_str(), BOUND, false)?;
+        let mut options = Vfs::mount_options(BOUND)?;
         options.read_only = true;
-        Vfs::remount(ROOT, options)
-    })();
-    let result = made.and_then(|()| {
+        Vfs::remount_bind(BOUND, options)?;
+        // A filesystem without symbolic links leaves that one case out.
+        Ok(Vfs::symlink(alloc::format!("{WRITABLE}/link").as_str(), "/.trees-test/a").is_ok())
+    });
+    let result = made.and_then(|linked| {
         let a = register(Path::new("/.trees-test/a"))?;
         let b = register(Path::new("/.trees-test//b/"))?;
         if a == 0 || b == a || register(Path::new("/.trees-test/a"))? != a {
@@ -178,14 +220,17 @@ pub fn self_test() -> KernelResult<()> {
                 "a directory named with a doubled or trailing separator got an id of its own",
             ));
         }
-        let refusals: [(&str, KernelError); 5] = [
+        let mut refusals: Vec<(&str, KernelError)> = alloc::vec![
             ("relative/dir", KernelError::InvalidArgument),
             ("/a/./b", KernelError::InvalidArgument),
             ("/a/../b", KernelError::InvalidArgument),
             ("/.trees-test/none", KernelError::NotFound),
-            // The root filesystem is writable.
-            ("/", KernelError::PermissionDenied),
+            (WRITABLE, KernelError::PermissionDenied),
+            (BOUND, KernelError::PermissionDenied),
         ];
+        if linked {
+            refusals.push(("/.trees-test-rw/link", KernelError::InvalidArgument));
+        }
         for (dir, want) in refusals {
             if register(Path::new(dir)) != Err(want) {
                 crate::serial_println!(
@@ -206,7 +251,7 @@ pub fn self_test() -> KernelResult<()> {
                 "a full table took another directory, or ids ran wrong",
             ));
         }
-        let rest = |id: u64, path: &str| beneath(id, Path::new(path)).map(|(_, rest)| rest);
+        let rest = |id: u64, path: &str| beneath(id, Path::new(path)).map(|r| r.rest);
         let cases: [(u64, &str, Option<&str>); 9] = [
             (a, "/.trees-test/a/fw/x.bin", Some("fw/x.bin")),
             (a, "/.trees-test/a/./fw/x.bin", Some("fw/x.bin")),
@@ -228,10 +273,26 @@ pub fn self_test() -> KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
+        if beneath(a, Path::new("/.trees-test/a/fw")).map(|r| r.dev)
+            != Some(crate::fs::vfs::dev_of(pinned.fs_id))
+        {
+            return Err(fail("a route did not carry its tree's filesystem"));
+        }
+        // Writable again, the tree is none; sealed again, it is.
+        sealed(false)?;
+        let while_writable = beneath(a, Path::new("/.trees-test/a/fw")).is_some();
+        sealed(true)?;
+        if while_writable || beneath(a, Path::new("/.trees-test/a/fw")).is_none() {
+            return Err(fail(
+                "a tree placed a path while its filesystem was writable, or not once sealed again",
+            ));
+        }
         Ok(a)
     });
-    // Ignored on purpose: the fixture's going is what the last check reads,
+    // Ignored on purpose: the fixtures' going is what the last check reads,
     // and a failure there is said by it.
+    let _ = Vfs::unmount(BOUND);
+    let _ = Vfs::unmount(WRITABLE);
     let _ = Vfs::unmount(ROOT);
     let a = result?;
     if beneath(a, Path::new("/.trees-test/a/fw/x.bin")).is_some() {
@@ -240,7 +301,7 @@ pub fn self_test() -> KernelResult<()> {
         ));
     }
     crate::serial_println!(
-        "[trees]   a tree's id kept, its directory named plainly and read-only, the table bounded, a path beneath it found component by component, and a tree whose directory went placing nothing: OK"
+        "[trees]   a tree's id kept; its directory named plainly, as a walk finds it, on a filesystem read-only as a whole -- not a read-only bind of a writable one; the table bounded; a path beneath it found component by component, its route carrying the tree's filesystem; and a tree whose filesystem was made writable or went placing nothing: OK"
     );
     Ok(())
 }

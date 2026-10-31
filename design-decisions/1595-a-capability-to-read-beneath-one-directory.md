@@ -22,14 +22,18 @@ as a user of its own rather than as root.
    process could make collide with the one it was given.
 2. **Every open by name honours it, to read only** (`open_authority` in
    `syscall::handlers`: `SYS_FS_OPEN`, `SYS_FS_OPEN_MODE`, the Linux
-   `open`/`openat`; not `openat2`, whose own base and confinement mean
-   nothing combined with a tree's). A process holding no `File` capability
-   (which is every file, as before) for the flags, but a `FileTree` one,
-   opens an absolute path beneath that tree's directory -- component by
-   component, `.` passed over, so `/ab` is not beneath `/a` -- with flags
-   asking for no more than reading: not for writing, which truncating,
-   appending and creating need too. Of several trees held, the nearest
-   directory is tried first, then the others.
+   `open`/`openat`, and the Linux `openat2` without `RESOLVE_BENEATH`; not
+   the native `SYS_FS_OPENAT2`, nor the Linux one with `RESOLVE_BENEATH`,
+   whose own base and confinement mean nothing combined with a tree's). A
+   process holding no `File` capability (which is every file, as before)
+   for the flags, but a `FileTree` one, opens an absolute path beneath that
+   tree's directory -- component by component, `.` passed over, so `/ab` is
+   not beneath `/a` -- with flags asking for no more than reading: not for
+   writing, truncating or appending (creating, refused by the open itself
+   without writing, asks nothing more). Of several trees held, the nearest
+   directory is tried first, then the others; when none opens, the refusal
+   that says most -- a file missing beneath one -- over a tree's refusing
+   to reach it.
    The walk is the existing resolve-beneath one (`fs::handle::open_beneath`,
    `openat2`'s `RESOLVE_BENEATH`): a `..` or a symbolic link leading out of
    the directory is refused, as `PermissionDenied`, like any file outside it.
@@ -53,22 +57,31 @@ as a user of its own rather than as root.
    Id 0, which elsewhere names a type as a whole, names no tree: the whole
    of files is the `File` capability (`cap` module docs).
 6. **A tree is a directory that cannot change under it** (added after the
-   first review, which escaped the first version three ways). `register`
-   takes only a directory on a read-only filesystem -- with no file
+   first two reviews, which escaped earlier versions six ways). `register`
+   takes only a directory on a filesystem read-only as a whole
+   (`Vfs::filesystem_read_only`: not a read-only bind mount of a writable
+   one, whose directory changes through the other mount) -- with no file
    permissions enforced, anyone who may write a filesystem could hard-link
-   any file into a directory on it -- and pins the tree to that directory's
-   filesystem and inode, which every open checks again: a filesystem
-   mounted over the path, or a symbolic link or another directory put where
-   it was, is not the tree, which then reads nothing. The boot medium's
-   firmware is placed on a memfs sealed read-only; an installed system's
-   `/lib/firmware`, on its writable root, is no tree
+   any file into a directory on it -- named as a walk finds it, through no
+   symbolic link, and pins the tree to that directory's filesystem and
+   inode. Every open checks all of it again, resolving the path as the
+   caller does (`Vfs::resolve_path`, through its namespace's bindings): a
+   filesystem mounted over the path, a symbolic link, a binding or another
+   directory put on its way, or the filesystem made writable, leaves the
+   tree reading nothing. And what the tree's walk opens must be on the
+   tree's own filesystem (`trees::Route::dev`, checked in
+   `open_in_trees`): a filesystem mounted beneath the directory is not the
+   tree. The boot medium's firmware is placed on a memfs sealed read-only;
+   an installed system's `/lib/firmware`, on its writable root, is no tree
    (known-issues A-AN-INSTALLED-SYSTEMS-FIRMWARE-IS-NO-TREE).
-7. **Driver processes run as uid 65533, not root** (`linuxdrv::DRIVER_UID`;
-   one that comes out root is refused). As root, a driver could mount over a
-   tree's path between the check and the walk; as itself it can mount
-   nothing. A third party that can mount could still race an open's check
-   against its walk -- but that party is root, which needs no tree's help to
-   read a file.
+7. **Driver processes run as uid 65533, not root** (`linuxdrv::DRIVER_UID`,
+   gid 65533; one with a root id of any kind -- user or group, real,
+   effective, saved, filesystem's, or a supplementary group -- is refused).
+   As root, a driver could mount over a tree's path between the check and
+   the walk; as itself it can mount nothing. A third party that can mount
+   could still race an open's check against its walk -- but that party is
+   root, which needs no tree's help to read a file. So could one that
+   mounted the same disk twice, once writable: root again.
 
 ### Alternatives
 
@@ -95,21 +108,25 @@ as a user of its own rather than as root.
 
 ### Checked by
 
-`fs::trees::self_test` (every boot): ids kept and never zero, a directory
-named with `.` or `..` or relatively refused, one on a writable filesystem
-refused, the table's bound, `beneath` component by component, `.` passed
-over, absolute only, no tree for id 0 or an id never given, and none once
-its filesystem is unmounted. `proc::spawn::self_test_open_rights` (every
-boot, ring 3), on a sealed memfs: a process holding only a tree opens a file
-beneath it to read -- through a `.`, `O_RDONLY | O_CREAT` too, and beneath a
-tree nested in it -- and is refused truncating or creating there, reading
-the file beside it, one reached by `..`, one reached by a symbolic link out
-of it, or a writable filesystem's; a nested tree does not read its
-parent's; of two nested trees held, what the nearer refuses opens through
-the other; a tree for another directory reads nothing there, and a tree
-reads nothing once another filesystem is mounted over its directory, which
-a `File` capability then reads. The linuxdrv self-test: every driver
-process is started as `DRIVER_UID`; the hello process loads the boot
-medium's firmware through Linux's loader holding only the firmware trees;
-holding none, or only a tree for another sealed directory, it loads
-nothing, its firmware initcall failing.
+`fs::trees::self_test` (every boot): ids kept and never zero; a directory
+named with `.` or `..`, relatively, or through a symbolic link refused, and
+one on a writable filesystem or on a read-only bind mount of one; the
+table's bound; `beneath` component by component, `.` passed over, absolute
+only, no tree for id 0 or an id never given, its route carrying the tree's
+filesystem, and none while its filesystem is writable or once it is
+unmounted. `proc::spawn::self_test_open_rights` (every boot, ring 3), on a
+sealed memfs: a process holding only a tree opens a file beneath it to read
+-- through a `.`, `O_RDONLY | O_CREAT` too, and beneath a tree nested in it
+-- and is refused truncating or creating there, reading the file beside it,
+one reached by `..` or by a symbolic link out of it, one on a filesystem
+mounted beneath the tree (which a `File` capability reads) or over it, or
+any while the tree's filesystem is writable; a nested tree does not read
+its parent's; of two nested trees held, what the nearer refuses opens
+through the other, and a file missing beneath the other is missing, not
+refused; a tree for another directory reads nothing there. A process
+holding `File` `READ` alone is refused truncating even when it opens to
+read only. The linuxdrv self-test: every driver process is started as
+`DRIVER_UID`; the hello process loads the boot medium's firmware through
+Linux's loader holding only the firmware trees; holding none, or only a
+tree for another sealed directory, it loads nothing, its firmware initcall
+failing.

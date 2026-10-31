@@ -143,7 +143,15 @@ fn start(
         }),
     };
     let process = spawn::spawn_process(program.elf, &options)?;
-    if program.driver && pcb::get_credentials(process.pid).is_none_or(|c| c.any_root_uid()) {
+    // Not root by any id: user, group or supplementary group, real,
+    // effective, saved or the filesystem's own.
+    let root = |c: pcb::ProcessCredentials| {
+        c.any_root_uid()
+            || c.fsuid == 0
+            || [c.gid, c.rgid, c.sgid, c.fsgid].contains(&0)
+            || c.groups.contains(&0)
+    };
+    if program.driver && pcb::get_credentials(process.pid).is_none_or(root) {
         serial_println!(
             "[linuxdrv]   FAIL: the driver process {} (pid {}) runs as root",
             program.name,
@@ -594,32 +602,40 @@ const SYSTEM_FIRMWARE_DIR: &str = "/lib/firmware";
 /// (known-issues A-LINUX-DRIVER-PROCESS-READS-FILES-UNCONFINED). Each only
 /// where it can be a tree: the boot medium's once placed
 /// ([`BOOT_FIRMWARE_PLACED`]), the system's where it is a directory on a
-/// read-only filesystem -- which an installed system's `/lib/firmware`, on
-/// its writable root, is not, said once
+/// filesystem read-only as a whole -- which an installed system's
+/// `/lib/firmware`, on its writable root, is not, said once
 /// (known-issues A-AN-INSTALLED-SYSTEMS-FIRMWARE-IS-NO-TREE).
 ///
 /// # Errors
 ///
-/// The tree registry's (`fs::trees::register`) other than for no such
-/// directory: full, say.
+/// `OutOfMemory`, the tree registry full (`fs::trees::register`); a
+/// directory that cannot be a tree is left out, said once, the driver
+/// started without it.
 fn firmware_reading() -> KernelResult<alloc::vec::Vec<(ResourceType, u64, Rights)>> {
     static SAID: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
     let mut trees = alloc::vec::Vec::new();
-    if BOOT_FIRMWARE_PLACED.load(core::sync::atomic::Ordering::Acquire) {
-        let id = crate::fs::trees::register(crate::fs::path::Path::new(BOOT_FIRMWARE_DIR))?;
-        trees.push((ResourceType::FileTree, id, Rights::READ));
-    }
-    match crate::fs::trees::register(crate::fs::path::Path::new(SYSTEM_FIRMWARE_DIR)) {
-        Ok(id) => trees.push((ResourceType::FileTree, id, Rights::READ)),
-        Err(KernelError::NotFound | KernelError::NotADirectory) => {}
-        Err(e @ (KernelError::PermissionDenied | KernelError::NotSupported)) => {
-            if !SAID.swap(true, core::sync::atomic::Ordering::Relaxed) {
-                serial_println!(
-                    "[linuxdrv] {SYSTEM_FIRMWARE_DIR} is not on a read-only filesystem with an identity ({e:?}): no driver process reads firmware there"
-                );
+    let placed = BOOT_FIRMWARE_PLACED.load(core::sync::atomic::Ordering::Acquire);
+    for (dir, wanted) in [(BOOT_FIRMWARE_DIR, placed), (SYSTEM_FIRMWARE_DIR, true)] {
+        if !wanted {
+            continue;
+        }
+        match crate::fs::trees::register(crate::fs::path::Path::new(dir)) {
+            Ok(id) => trees.push((ResourceType::FileTree, id, Rights::READ)),
+            // No such directory -- the system's, on a machine without one.
+            Err(KernelError::NotFound | KernelError::NotADirectory)
+                if dir == SYSTEM_FIRMWARE_DIR => {}
+            // The table full is the kernel's own bug, said by its caller.
+            Err(KernelError::OutOfMemory) => return Err(KernelError::OutOfMemory),
+            // A directory that cannot be a tree: the driver is started
+            // without it, reading no firmware there, rather than not at all.
+            Err(e) => {
+                if !SAID.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                    serial_println!(
+                        "[linuxdrv] {dir} cannot be a tree ({e:?}: not a plainly named directory on a filesystem read-only as a whole): no driver process reads firmware there"
+                    );
+                }
             }
         }
-        Err(e) => return Err(e),
     }
     Ok(trees)
 }

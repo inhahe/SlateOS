@@ -6939,6 +6939,19 @@ impl Vfs {
         Ok(mp.effective_options())
     }
 
+    /// Whether the filesystem holding `path` -- not the mount it is reached
+    /// through -- is read-only (Linux's `SB_RDONLY`, [`Self::remount`]'s):
+    /// read-only then through every mount of it, its bind mounts and every
+    /// namespace's copies, so that no path writes it. A mount made read-only
+    /// alone ([`Self::remount_bind`]) is not: its filesystem may be written
+    /// through another.
+    pub fn filesystem_read_only(path: impl AsRef<Path>) -> KernelResult<bool> {
+        let ns = super::mntns::current();
+        let mut vfs = VFS.lock();
+        let (mp, _) = find_mount(vfs.table_mut(ns)?, path.as_ref())?;
+        Ok(mp.fs_read_only.load(Ordering::Relaxed))
+    }
+
     /// The mounted filesystem an already-resolved host `path` is on: where it
     /// is mounted, its type, its `fs_id`, whether it is read-only, and the
     /// volume's own UUID ([`FileSystem::volume_uuid`]).

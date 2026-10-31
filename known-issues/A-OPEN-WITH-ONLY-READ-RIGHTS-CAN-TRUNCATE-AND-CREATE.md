@@ -39,8 +39,9 @@ reads), and give it what it uses.
 
 **Fixed (lane A, 2026-10-30).** `require_open_rights` in
 `kernel/src/syscall/handlers.rs`: `READ` always, and `WRITE` too for an open
-for writing. Truncating, appending and creating ask nothing more, since the
-VFS refuses each without the `WRITE` bit (`open_resolved_within`) -- so
+for writing, truncating or appending -- as Linux asks write permission for
+`O_TRUNC` whatever the access mode. Creating asks nothing more: the VFS
+creates only for an open for writing (`open_resolved_within`), so
 `O_RDONLY | O_CREAT` of a file that exists, which `flock(1)` opens, is a
 read, as on Linux. Every open path asks it: by name through
 `open_authority` (`sys_fs_open`, `sys_fs_open_mode`, the kernel-path helpers

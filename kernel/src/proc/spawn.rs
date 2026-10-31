@@ -4426,6 +4426,10 @@ pub fn self_test_open_rights() -> KernelResult<()> {
     const LINK: &str = "/.open-rights-trees/a/out";
     /// Another directory, a tree of its own.
     const OTHER: &str = "/.open-rights-trees/other";
+    /// A directory in the tree another filesystem is mounted on, and a file
+    /// in that one.
+    const MOUNTED: &str = "/.open-rights-trees/a/mnt";
+    const IN_MOUNTED: &str = "/.open-rights-trees/a/mnt/m.txt";
 
     serial_println!("[spawn] Running open rights and FileTree (ring 3) test...");
     let mut skips = crate::fs::selftest::Skips::new();
@@ -4452,23 +4456,53 @@ pub fn self_test_open_rights() -> KernelResult<()> {
     let _ = Vfs::remove(NEW);
     let _ = Vfs::remove(MADE);
     let _ = Vfs::remove(FIFO);
-    let mut failed = 0u32;
-    let mut fail = |what: core::fmt::Arguments<'_>| {
+    // Counted through a shared cell, so that the checks below and the
+    // fixture's own failures can both say one.
+    let failed = core::cell::Cell::new(0u32);
+    let fail = |what: core::fmt::Arguments<'_>| {
         serial_println!("[spawn]   FAIL: open rights: {what}");
-        failed = failed.saturating_add(1);
+        failed.set(failed.get().saturating_add(1));
     };
-    if let Err(e) = Vfs::mknod_fifo(FIFO, 0o644) {
-        fail(format_args!(
-            "the named pipe {FIFO} could not be made: {e:?}"
-        ));
-    }
+    // A filesystem without named pipes leaves those cases out, said.
+    let piped = match Vfs::mknod_fifo(FIFO, 0o644) {
+        Ok(_) => true,
+        Err(KernelError::NotSupported) => {
+            skips.record(
+                "open rights: a named pipe's ends",
+                "the root filesystem makes no named pipe",
+            );
+            false
+        }
+        Err(e) => {
+            fail(format_args!(
+                "the named pipe {FIFO} could not be made: {e:?}"
+            ));
+            false
+        }
+    };
+    // The writable fixture's leftovers, gone whatever the cases found.
+    // Ignored on purpose: they harm nothing, and a failure here says
+    // nothing about the rights tested.
+    let leave = || {
+        for leftover in [NEW, MADE, FIFO, FILE, EMPTIED] {
+            let _ = Vfs::remove(leftover);
+        }
+        let _ = Vfs::rmdir(DIR);
+    };
 
     // The sealed fixture, sealed as a placed firmware directory is; a
     // filesystem without symbolic links leaves that one case out, said.
-    crate::fs::memfs::mount(SEALED)?;
+    if let Err(e) = crate::fs::memfs::mount(SEALED) {
+        serial_println!(
+            "[spawn]   FAIL: open rights: no filesystem could be mounted at {SEALED}: {e:?}"
+        );
+        leave();
+        return Err(KernelError::InternalError);
+    }
     let mut linked = false;
     let sealed = (|| {
         Vfs::mkdir_all(NESTED)?;
+        Vfs::mkdir(MOUNTED)?;
         Vfs::mkdir(OTHER)?;
         Vfs::write_file(IN_TREE, CONTENT)?;
         Vfs::write_file(IN_NESTED, CONTENT)?;
@@ -4492,9 +4526,19 @@ pub fn self_test_open_rights() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: open rights: the sealed trees could not be made: {e:?}"
             );
+            leave();
             return Err(KernelError::InternalError);
         }
     };
+    // A writable filesystem mounted beneath the tree, a file in it: reached
+    // by the tree's walk, and not the tree's.
+    if let Err(e) =
+        crate::fs::memfs::mount(MOUNTED).and_then(|()| Vfs::write_file(IN_MOUNTED, CONTENT))
+    {
+        fail(format_args!(
+            "a filesystem could not be mounted beneath the tree at {MOUNTED}: {e:?}"
+        ));
+    }
 
     let read_only = [(ResourceType::File, 0u64, Rights::READ)];
     let read_write = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
@@ -4508,6 +4552,7 @@ pub fn self_test_open_rights() -> KernelResult<()> {
     let read = F::READ.bits();
     let read_create = F::READ.bits() | F::CREATE.bits();
     let truncate = F::READ.bits() | F::WRITE.bits() | F::TRUNCATE.bits();
+    let read_truncate = F::READ.bits() | F::TRUNCATE.bits();
     let create = F::READ.bits() | F::WRITE.bits() | F::CREATE.bits();
     // Syscall numbers, all below 2^32.
     #[allow(clippy::cast_possible_truncation)]
@@ -4546,6 +4591,14 @@ pub fn self_test_open_rights() -> KernelResult<()> {
             1
         ),
         (
+            "READ alone does not truncate, open to read only",
+            &read_only,
+            fs_open,
+            FILE,
+            read_truncate,
+            1
+        ),
+        (
             "READ alone does not create",
             &read_only,
             fs_open,
@@ -4568,30 +4621,6 @@ pub fn self_test_open_rights() -> KernelResult<()> {
             MADE,
             create,
             0
-        ),
-        (
-            "READ opens a named pipe's read end",
-            &read_only,
-            fifo_open,
-            FIFO,
-            read,
-            0
-        ),
-        (
-            "READ alone does not open its write end",
-            &read_only,
-            fifo_open,
-            FIFO,
-            F::WRITE.bits(),
-            1
-        ),
-        (
-            "READ and WRITE reach its write end, which has no reader",
-            &read_write,
-            fifo_open,
-            FIFO,
-            F::WRITE.bits(),
-            2
         ),
         (
             "a tree opens to read beneath it",
@@ -4658,12 +4687,20 @@ pub fn self_test_open_rights() -> KernelResult<()> {
             1
         ),
         (
-            "a tree does not read a writable filesystem's file",
+            "a tree does not read a filesystem mounted beneath it",
             &in_tree,
             fs_open,
-            FILE,
+            IN_MOUNTED,
             read,
             1
+        ),
+        (
+            "a File capability reads the filesystem mounted beneath the tree",
+            &read_only,
+            fs_open,
+            IN_MOUNTED,
+            read,
+            0
         ),
         (
             "a nested tree opens beneath itself",
@@ -4698,6 +4735,14 @@ pub fn self_test_open_rights() -> KernelResult<()> {
             0
         ),
         (
+            "of two nested trees, a file the other finds missing is missing, not refused",
+            &in_both,
+            fs_open,
+            "/.open-rights-trees/a/sub/../none.txt",
+            read,
+            2
+        ),
+        (
             "a tree for another directory reads nothing here",
             &in_other,
             fs_open,
@@ -4706,6 +4751,34 @@ pub fn self_test_open_rights() -> KernelResult<()> {
             1
         ),
     ];
+    if piped {
+        cases.extend([
+            (
+                "READ opens a named pipe's read end",
+                &read_only[..],
+                fifo_open,
+                FIFO,
+                read,
+                0,
+            ),
+            (
+                "READ alone does not open its write end",
+                &read_only[..],
+                fifo_open,
+                FIFO,
+                F::WRITE.bits(),
+                1,
+            ),
+            (
+                "READ and WRITE reach its write end, which has no reader",
+                &read_write[..],
+                fifo_open,
+                FIFO,
+                F::WRITE.bits(),
+                2,
+            ),
+        ]);
+    }
     if linked {
         cases.push((
             "a tree does not read out of it by a symbolic link",
@@ -4743,7 +4816,7 @@ pub fn self_test_open_rights() -> KernelResult<()> {
         teardown_fixture(result.pid, result.task_id);
         Ok(code.filter(|_| ended))
     }
-    let mut check = |what: &str, elf: &[u8], caps: &[(ResourceType, u64, Rights)], want: i32| {
+    let check = |what: &str, elf: &[u8], caps: &[(ResourceType, u64, Rights)], want: i32| {
         match probe(elf, caps) {
             Ok(Some(got)) if got == want => {}
             got => fail(format_args!(
@@ -4770,19 +4843,50 @@ pub fn self_test_open_rights() -> KernelResult<()> {
     }
     // The pipe reopened for writing through /proc/self/fd, from its read
     // end: the File rights an open for writing asks.
-    let reopen = elf::build_linux_fifo_reopen_probe_elf(&nul(FIFO));
-    check(
-        "READ alone does not reopen a pipe's read end for writing",
-        &reopen,
-        &read_only,
-        1,
-    );
-    check(
-        "READ and WRITE reopen a pipe's read end for writing",
-        &reopen,
-        &read_write,
-        0,
-    );
+    if piped {
+        let reopen = elf::build_linux_fifo_reopen_probe_elf(&nul(FIFO));
+        check(
+            "READ alone does not reopen a pipe's read end for writing",
+            &reopen,
+            &read_only,
+            1,
+        );
+        check(
+            "READ and WRITE reopen a pipe's read end for writing",
+            &reopen,
+            &read_write,
+            0,
+        );
+    }
+
+    // The tree's filesystem made writable: the tree reads nothing there;
+    // sealed again, it reads again.
+    let reseal = |read_only: bool| {
+        let mut options = Vfs::mount_options(SEALED)?;
+        options.read_only = read_only;
+        Vfs::remount(SEALED, options)
+    };
+    let opens = open_probe(fs_open, IN_TREE, read, 0);
+    match reseal(false) {
+        Ok(()) => {
+            check(
+                "a tree reads nothing while its filesystem is writable",
+                &opens,
+                &in_tree,
+                1,
+            );
+            match reseal(true) {
+                Ok(()) => check(
+                    "a tree reads again once its filesystem is sealed again",
+                    &opens,
+                    &in_tree,
+                    0,
+                ),
+                Err(e) => fail(format_args!("{SEALED} could not be sealed again: {e:?}")),
+            }
+        }
+        Err(e) => fail(format_args!("{SEALED} could not be made writable: {e:?}")),
+    }
 
     // Another filesystem mounted over the tree's directory, with a file of
     // the same name: there for the File capability, no longer the tree's.
@@ -4817,18 +4921,16 @@ pub fn self_test_open_rights() -> KernelResult<()> {
     }
     // Ignored on purpose: the fixture's leftovers harm nothing, and a
     // failure here says nothing about the rights tested.
+    let _ = Vfs::unmount(MOUNTED);
     let _ = Vfs::unmount(TREE);
     let _ = Vfs::unmount(SEALED);
-    for leftover in [NEW, MADE, FIFO, FILE, EMPTIED] {
-        let _ = Vfs::remove(leftover);
-    }
-    let _ = Vfs::rmdir(DIR);
+    leave();
     skips.report("[spawn]");
-    if failed > 0 {
+    if failed.get() > 0 {
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[spawn]   open rights: READ alone reads -- O_CREAT of a file there too -- and neither truncates, creates nor opens a pipe to write, natively or by /proc/self/fd; a FileTree reads beneath its sealed directory and nowhere else -- not beside it, not out by .. or a link, not its parent's from a nested one, not once a filesystem is mounted over it: OK"
+        "[spawn]   open rights: READ alone reads -- O_CREAT of a file there too -- and neither truncates, creates nor opens a pipe to write, natively or by /proc/self/fd; a FileTree reads beneath its sealed directory and nowhere else -- not beside it, not out by .. or a link, not its parent's from a nested one, not on a filesystem mounted beneath or over it, not while its filesystem is writable: OK"
     );
     Ok(())
 }

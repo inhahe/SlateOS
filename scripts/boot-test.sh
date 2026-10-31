@@ -2094,13 +2094,13 @@ CARD_BOOT_LEASED="[netstack] serving over $CARD_BOOT_SERVICE: "
 CARD_BOOT_WAITING="[netstack] serve: no address over $CARD_BOOT_SERVICE yet"
 # What the kernel prints when the persistent daemon could not be started.
 CARD_BOOT_NO_DAEMON="persistent userspace netstack (ring 3) startup failed"
-# What the processes the card boot rests on print when they panic: the
-# daemon's panic handler (services/netstack) and the driver layer's Rust
-# half's (linuxdrv/kit). The kernel's own is KERNEL_DEATH_RE's.
-CARD_BOOT_PANICS=(
-    "!!! PANIC in netstack !!!"
-    "[lx] the layer's Rust half panicked"
-)
+# What a process prints when it panics, in the shapes the tree's panic
+# handlers have: `[httpget] PANIC` closing a line (the capstone clients),
+# `!!! PANIC in netstack !!!` (the daemon, init, the services), the driver
+# layer's Rust half's line (linuxdrv/kit), and Rust's own `panicked at `.
+# A line that only mentions a panic -- `panic=0`, a child reaped that
+# panicked -- has none of them. The kernel's own is KERNEL_DEATH_RE's.
+CARD_BOOT_PANIC_RE='\[[A-Za-z0-9_.-]+\] PANIC$|!!! PANIC in [^!]+ !!!|\[lx\] the layer.s Rust half panicked|panicked at '
 # Lines the persistent daemon prints only when it reached past QEMU's
 # network: each one the main boot printed, the card boot must print too.
 CARD_BOOT_UPSTREAM=(
@@ -2116,10 +2116,15 @@ CARD_BOOT_FAILED=0
 # The cable's state, card_boot_cable_step's: 0 to pull, 1 out until the
 # daemon says it waits, 2 in. CARD_BOOT_PULLED is "pulled" once it was out
 # before the driver started; CARD_BOOT_PULL_FAILED what the monitor last
-# answered a pull that failed.
+# answered a pull that failed. A pull that fails waits CARD_BOOT_PULL_BACKOFF
+# steps before the next, twice the last wait and at most 25 (five seconds of
+# the wait loop's 0.2 s), counted down in CARD_BOOT_PULL_WAIT: a monitor that
+# keeps refusing is asked a dozen times a minute, not five times a second.
 CARD_BOOT_CABLE=2
 CARD_BOOT_PULLED=""
 CARD_BOOT_PULL_FAILED=""
+CARD_BOOT_PULL_BACKOFF=1
+CARD_BOOT_PULL_WAIT=0
 
 # The card boot's kernel command line: its deadline -- the liveness
 # watchdog's, timed to land before the harness gives up on it -- and its
@@ -2158,6 +2163,10 @@ card_boot_cable_step() {
                 echo "=== Card boot: the cable was not pulled before the driver started${CARD_BOOT_PULL_FAILED:+ (the monitor last answered $CARD_BOOT_PULL_FAILED)}: the wait for the card's network is not checked ==="
                 return 0
             fi
+            if [ "$CARD_BOOT_PULL_WAIT" -gt 0 ]; then
+                CARD_BOOT_PULL_WAIT=$(( CARD_BOOT_PULL_WAIT - 1 ))
+                return 0
+            fi
             said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link $CARD_BOOT_NETDEV off" 2>&1)" || rc=$?
             if [ "$rc" -eq 0 ]; then
                 CARD_BOOT_CABLE=1
@@ -2165,6 +2174,8 @@ card_boot_cable_step() {
                 echo "=== Card boot: the spare card's cable pulled ==="
             else
                 CARD_BOOT_PULL_FAILED="rc $rc${said:+: $said}"
+                CARD_BOOT_PULL_BACKOFF=$(( CARD_BOOT_PULL_BACKOFF * 2 > 25 ? 25 : CARD_BOOT_PULL_BACKOFF * 2 ))
+                CARD_BOOT_PULL_WAIT=$CARD_BOOT_PULL_BACKOFF
             fi
             ;;
         1)
@@ -2196,7 +2207,7 @@ card_boot_cable_step() {
 # whole log when it never came. A failure is what the main boot's own checks
 # call one (check_selftest_failures, check_liveness_failures,
 # kernel_is_dead's KERNEL_DEATH_RE), a check's FAIL line, and a panic of the
-# daemon or of a driver process (CARD_BOOT_PANICS). A check that skipped for want of an
+# process (CARD_BOOT_PANIC_RE). A check that skipped for want of an
 # upstream passes, as it does in the main boot -- unless the main boot's
 # daemon reached that upstream (CARD_BOOT_UPSTREAM). The card must be served
 # on its own network (CARD_BOOT_SUBNET), and SYS_NET_IF_INFO must say so. With $3 "pulled",
@@ -2204,10 +2215,6 @@ card_boot_cable_step() {
 # that it waited for the card's network, before it served over it.
 card_boot_verdict() {
     local log="$1" main="${2:-}" pulled="${3:-}" upto part bad want served proof waited
-    local panics=() panic
-    for panic in "${CARD_BOOT_PANICS[@]}"; do
-        panics+=(-e "$panic")
-    done
     if [ ! -f "$log" ]; then
         echo "no serial log"
         echo "none at $log"
@@ -2229,7 +2236,8 @@ card_boot_verdict() {
     fi
     bad="$( { grep -a -i -F -- "self-test failed" <<< "$part" || true
               grep -a -E -- "$LIVENESS_FAILURE_RE" <<< "$part" || true
-              grep -a -F -e "  FAIL" -e "$CARD_BOOT_NO_DAEMON" "${panics[@]}" <<< "$part" || true; } )"
+              grep -a -F -e "  FAIL" -e "$CARD_BOOT_NO_DAEMON" <<< "$part" || true
+              grep -a -E -- "$CARD_BOOT_PANIC_RE" <<< "$part" || true; } )"
     if [ -n "$bad" ]; then
         echo "a check failed"
         echo "${bad%%$'\n'*}" | cut -c1-200
@@ -2342,6 +2350,8 @@ card_boot() {
     if [ -n "$CABLE_PY" ] && [ "${#MONITOR_ARGS[@]}" -gt 0 ]; then
         CARD_BOOT_CABLE=0
         CARD_BOOT_PULL_FAILED=""
+        CARD_BOOT_PULL_BACKOFF=1
+        CARD_BOOT_PULL_WAIT=0
     else
         CARD_BOOT_CABLE=2
         echo "=== Card boot: the cable stays in (no monitor, or no Python to drive it): the wait for the card's network is not checked ==="

@@ -13660,13 +13660,12 @@ pub fn fs_open_kernel_path_mode(
 ) -> SyscallResult {
     let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
     let path = path.as_ref();
-    let opened = match open_authority(path, flags) {
-        Ok(OpenAuthority::EveryFile) => crate::fs::handle::open_with_mode(path, flags, create_mode),
-        Ok(OpenAuthority::Trees(trees)) => open_in_trees(&trees, |b| {
-            crate::fs::handle::open_beneath_with_mode(b, flags, create_mode)
-        }),
-        Err(e) => Err(e),
-    };
+    let opened = open_as_authorized(
+        open_authority(path, flags),
+        path,
+        |p| crate::fs::handle::open_with_mode(p, flags, create_mode),
+        |b| crate::fs::handle::open_beneath_with_mode(b, flags, create_mode),
+    );
     match opened {
         Ok(handle) => {
             register_for_caller(ResourceType::File, handle);
@@ -13698,15 +13697,12 @@ pub fn fs_open_node_kernel_path_mode(
 ) -> NodeOpen {
     let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
     let path = path.as_ref();
-    let opened = match open_authority(path, flags) {
-        Ok(OpenAuthority::EveryFile) => {
-            crate::fs::handle::open_node_with_mode(path, flags, create_mode)
-        }
-        Ok(OpenAuthority::Trees(trees)) => open_in_trees(&trees, |b| {
-            crate::fs::handle::open_node_beneath_with_mode(b, flags, create_mode)
-        }),
-        Err(e) => Err(e),
-    };
+    let opened = open_as_authorized(
+        open_authority(path, flags),
+        path,
+        |p| crate::fs::handle::open_node_with_mode(p, flags, create_mode),
+        |b| crate::fs::handle::open_node_beneath_with_mode(b, flags, create_mode),
+    );
     match opened {
         Ok(crate::fs::handle::Opened::File(handle)) => {
             register_for_caller(ResourceType::File, handle);
@@ -13840,12 +13836,13 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
     let flags = crate::fs::handle::OpenFlags::from_bits(args.arg2 as u32);
     // Capability: a File capability with the rights the flags ask for,
     // which is every file -- or, to read only, a FileTree one naming a
-    // directory the path lies beneath (open_authority).
-    // Refused before the path is read when the caller holds neither.
-    if let Err(e) = require_open_rights(flags) {
-        if require_cap_type(crate::cap::ResourceType::FileTree, crate::cap::Rights::READ).is_err() {
-            return SyscallResult::err(e);
-        }
+    // directory the path lies beneath (open_authority). Refused before the
+    // path is read when the caller holds neither.
+    let rights = require_open_rights(flags);
+    if let Err(e) = rights
+        && require_cap_type(crate::cap::ResourceType::FileTree, crate::cap::Rights::READ).is_err()
+    {
+        return SyscallResult::err(e);
     }
 
     let path_len = args.arg1 as usize;
@@ -13859,13 +13856,12 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    let opened = match open_authority(path.as_path(), flags) {
-        Ok(OpenAuthority::EveryFile) => crate::fs::handle::open(&path, flags),
-        Ok(OpenAuthority::Trees(trees)) => {
-            open_in_trees(&trees, |b| crate::fs::handle::open_beneath(b, flags))
-        }
-        Err(e) => Err(e),
-    };
+    let opened = open_as_authorized(
+        open_authority_given(rights, path.as_path(), flags),
+        path.as_path(),
+        |p| crate::fs::handle::open(p, flags),
+        |b| crate::fs::handle::open_beneath(b, flags),
+    );
     match opened {
         Ok(handle) => {
             // Track the open file handle as a per-process resource so it
@@ -13885,15 +13881,17 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// The File capability rights an open asking `flags` needs: `READ` always,
-/// and `WRITE` as well to open for writing. Writing to the handle asks no
-/// capability of its own -- `SYS_FS_WRITE` checks only that the caller owns
-/// a handle open for writing -- so this is the one gate on writing a file
-/// (known-issues A-OPEN-WITH-ONLY-READ-RIGHTS-CAN-TRUNCATE-AND-CREATE). An
-/// open truncates, appends or creates only when open for writing
-/// (`fs::handle::open_resolved_within` refuses each without it), so those
-/// flags ask nothing more: `O_RDONLY|O_CREAT` on a file that exists, which
-/// `flock(1)` opens, is a read. Whether an open that creates should ask
-/// `CREATE` as `sys_fs_create` does is known-issues
+/// and `WRITE` as well to open for writing, to truncate or to append -- as
+/// Linux's `build_open_flags` asks `MAY_WRITE` for `O_TRUNC` whatever the
+/// access mode. Writing to the handle asks no capability of its own --
+/// `SYS_FS_WRITE` checks only that the caller owns a handle open for
+/// writing -- so this is the one gate on writing a file (known-issues
+/// A-OPEN-WITH-ONLY-READ-RIGHTS-CAN-TRUNCATE-AND-CREATE). Creating asks
+/// nothing more: `O_RDONLY|O_CREAT` on a file that exists, which `flock(1)`
+/// opens, is a read, and one that would make a file is refused by the open
+/// itself (`fs::handle::open_resolved_within`, which creates only for an
+/// open for writing). Whether an open that creates should ask `CREATE` as
+/// `sys_fs_create` does is known-issues
 /// A-AN-OPEN-THAT-CREATES-ASKS-WRITE-NOT-CREATE.
 ///
 /// # Errors
@@ -13901,8 +13899,12 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
 /// `PermissionDenied` for a right the caller's File capabilities lack.
 pub(crate) fn require_open_rights(flags: crate::fs::handle::OpenFlags) -> Result<(), KernelError> {
     use crate::cap::{ResourceType, Rights};
+    use crate::fs::handle::OpenFlags;
     require_cap_type(ResourceType::File, Rights::READ)?;
-    if flags.is_writable() {
+    if flags.is_writable()
+        || flags.contains(OpenFlags::TRUNCATE)
+        || flags.contains(OpenFlags::APPEND)
+    {
         require_cap_type(ResourceType::File, Rights::WRITE)?;
     }
     Ok(())
@@ -13913,16 +13915,17 @@ pub(crate) enum OpenAuthority {
     /// Its File capability, with the rights the flags ask for: every file.
     EveryFile,
     /// To read only, beneath one of the directory trees it holds `FileTree`
-    /// capabilities for (design-decisions 1595): each tree's directory and
-    /// the rest of the path beneath it, the deepest tree first.
-    Trees(alloc::vec::Vec<(crate::fs::path::PathBuf, crate::fs::path::PathBuf)>),
+    /// capabilities for (design-decisions 1595): where the path lies in each
+    /// ([`crate::fs::trees::Route`]), the deepest tree first.
+    Trees(alloc::vec::Vec<crate::fs::trees::Route>),
 }
 
 /// What lets the caller open `path` with `flags`: its File capability with
 /// the rights the flags ask for ([`require_open_rights`]), else -- the
-/// flags asking only to read -- its `FileTree` capabilities whose
-/// directories `path` lies beneath ([`crate::fs::trees::beneath`]). Every
-/// open path by name asks this, and opens as it answers ([`open_in_trees`]).
+/// flags asking nothing [`require_open_rights`] asks `WRITE` for -- its
+/// `FileTree` capabilities whose directories `path` lies beneath
+/// ([`crate::fs::trees::beneath`]). Every open by name asks this
+/// ([`open_as_authorized`]).
 ///
 /// # Errors
 ///
@@ -13931,11 +13934,27 @@ pub(crate) fn open_authority(
     path: &crate::fs::path::Path,
     flags: crate::fs::handle::OpenFlags,
 ) -> Result<OpenAuthority, KernelError> {
-    let denied = match require_open_rights(flags) {
+    open_authority_given(require_open_rights(flags), path, flags)
+}
+
+/// [`open_authority`], `rights` the caller's [`require_open_rights`] for
+/// `flags` already asked -- a syscall asks it before it reads the path, to
+/// refuse a caller holding neither right without reading anything, and
+/// reuses the answer rather than ask twice on the busiest file syscall.
+pub(crate) fn open_authority_given(
+    rights: Result<(), KernelError>,
+    path: &crate::fs::path::Path,
+    flags: crate::fs::handle::OpenFlags,
+) -> Result<OpenAuthority, KernelError> {
+    use crate::fs::handle::OpenFlags;
+    let denied = match rights {
         Ok(()) => return Ok(OpenAuthority::EveryFile),
         Err(e) => e,
     };
-    if flags.is_writable() {
+    if flags.is_writable()
+        || flags.contains(OpenFlags::TRUNCATE)
+        || flags.contains(OpenFlags::APPEND)
+    {
         return Err(denied);
     }
     let Some(held) = caller_pid().and_then(pcb::cap_entries) else {
@@ -13952,32 +13971,102 @@ pub(crate) fn open_authority(
         return Err(denied);
     }
     // The deepest first: of two nested trees, the nearer directory.
-    trees.sort_by_key(|(base, _)| core::cmp::Reverse(base.components().count()));
+    trees.sort_by_key(|r| core::cmp::Reverse(r.base.components().count()));
     Ok(OpenAuthority::Trees(trees))
 }
 
-/// `open` tried beneath each of `trees` in turn ([`OpenAuthority::Trees`]),
-/// the first that opens answering; when none does, the first tree's refusal
-/// -- a walk that would leave its tree (`CrossDevice`) being
-/// `PermissionDenied`, as any file outside it is.
+/// What an open makes, as a tree's open must check it: the file handle it
+/// gives -- whose filesystem must be the tree's -- and how to give it back
+/// when it is not; `None` for what a tree opens nothing of (a named pipe,
+/// whose writer is anyone's).
+pub(crate) trait TreeOpened: Sized {
+    /// The file handle opened, if one was.
+    fn file_handle(&self) -> Option<u64>;
+}
+
+impl TreeOpened for u64 {
+    fn file_handle(&self) -> Option<u64> {
+        Some(*self)
+    }
+}
+
+impl TreeOpened for crate::fs::handle::Opened {
+    fn file_handle(&self) -> Option<u64> {
+        match self {
+            crate::fs::handle::Opened::File(handle) => Some(*handle),
+            crate::fs::handle::Opened::Fifo(_) => None,
+        }
+    }
+}
+
+/// An open by name, as `authority` ([`open_authority`]) allows it: by
+/// `every` the path itself, or else `beneath` each tree in turn
+/// ([`open_in_trees`]).
 ///
 /// # Errors
 ///
-/// The first tree's open's, as said.
-pub(crate) fn open_in_trees<T>(
-    trees: &[(crate::fs::path::PathBuf, crate::fs::path::PathBuf)],
+/// `authority`'s refusal, or the open's.
+pub(crate) fn open_as_authorized<T: TreeOpened>(
+    authority: Result<OpenAuthority, KernelError>,
+    path: &crate::fs::path::Path,
+    every: impl FnOnce(&crate::fs::path::Path) -> KernelResult<T>,
+    beneath: impl Fn(crate::fs::handle::Beneath<'_>) -> KernelResult<T>,
+) -> KernelResult<T> {
+    match authority? {
+        OpenAuthority::EveryFile => every(path),
+        OpenAuthority::Trees(trees) => open_in_trees(&trees, beneath),
+    }
+}
+
+/// `open` tried beneath each of `trees` in turn ([`OpenAuthority::Trees`]),
+/// the first that opens a file on its tree's own filesystem answering -- one
+/// reached through a filesystem mounted beneath the tree, or no file at all,
+/// is given back and refused. When none opens, the most telling refusal:
+/// one that says what is there (`NotFound`, say) over one that only says a
+/// tree may not reach it -- a walk that would leave its tree
+/// (`CrossDevice`), which is answered `PermissionDenied`, as any file
+/// outside every tree is.
+///
+/// # Errors
+///
+/// As said.
+pub(crate) fn open_in_trees<T: TreeOpened>(
+    trees: &[crate::fs::trees::Route],
     open: impl Fn(crate::fs::handle::Beneath<'_>) -> KernelResult<T>,
 ) -> KernelResult<T> {
-    let mut first = None;
-    for (base, rest) in trees {
-        match open(crate::fs::handle::Beneath { base, rel: rest }) {
+    let telling =
+        |e: &KernelError| !matches!(e, KernelError::CrossDevice | KernelError::PermissionDenied);
+    let mut refused: Option<KernelError> = None;
+    for route in trees {
+        let answer = open(crate::fs::handle::Beneath {
+            base: &route.base,
+            rel: &route.rest,
+        })
+        .and_then(|opened| {
+            let on_tree = opened
+                .file_handle()
+                .and_then(|h| crate::fs::handle::fstat(h).ok())
+                .is_some_and(|meta| meta.dev == route.dev);
+            if on_tree {
+                return Ok(opened);
+            }
+            if let Some(handle) = opened.file_handle() {
+                // Ignored on purpose: the handle is this call's own, never
+                // given out, and the refusal is the answer.
+                let _ = crate::fs::handle::close(handle);
+            }
+            Err(KernelError::PermissionDenied)
+        });
+        match answer {
             Ok(opened) => return Ok(opened),
             Err(e) => {
-                first.get_or_insert(e);
+                if refused.as_ref().is_none_or(|r| !telling(r) && telling(&e)) {
+                    refused = Some(e);
+                }
             }
         }
     }
-    Err(match first.unwrap_or(KernelError::PermissionDenied) {
+    Err(match refused.unwrap_or(KernelError::PermissionDenied) {
         KernelError::CrossDevice => KernelError::PermissionDenied,
         e => e,
     })
@@ -14003,10 +14092,11 @@ pub fn sys_fs_open_mode(args: &SyscallArgs) -> SyscallResult {
     let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
     // Refused before the path is read when the caller holds neither a File
     // capability for the flags nor a tree (open_authority).
-    if let Err(e) = require_open_rights(flags) {
-        if require_cap_type(crate::cap::ResourceType::FileTree, crate::cap::Rights::READ).is_err() {
-            return SyscallResult::err(e);
-        }
+    let rights = require_open_rights(flags);
+    if let Err(e) = rights
+        && require_cap_type(crate::cap::ResourceType::FileTree, crate::cap::Rights::READ).is_err()
+    {
+        return SyscallResult::err(e);
     }
 
     let path_len = args.arg1 as usize;
@@ -14039,15 +14129,12 @@ pub fn sys_fs_open_mode(args: &SyscallArgs) -> SyscallResult {
         mode_raw & 0o7777
     };
 
-    let opened = match open_authority(path.as_path(), flags) {
-        Ok(OpenAuthority::EveryFile) => {
-            crate::fs::handle::open_with_mode(&path, flags, create_mode)
-        }
-        Ok(OpenAuthority::Trees(trees)) => open_in_trees(&trees, |b| {
-            crate::fs::handle::open_beneath_with_mode(b, flags, create_mode)
-        }),
-        Err(e) => Err(e),
-    };
+    let opened = open_as_authorized(
+        open_authority_given(rights, path.as_path(), flags),
+        path.as_path(),
+        |p| crate::fs::handle::open_with_mode(p, flags, create_mode),
+        |b| crate::fs::handle::open_beneath_with_mode(b, flags, create_mode),
+    );
     match opened {
         Ok(handle) => {
             if let Some(pid) = caller_pid() {

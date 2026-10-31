@@ -165,9 +165,12 @@ const FADT_X_GPE1_OFFSET: usize = 232;
 /// Parsed power management information from the FADT.
 #[derive(Debug, Clone, Copy)]
 pub struct PowerInfo {
-    /// PM1a Control Block port address.
+    /// PM1a Control Block port address: the 64-bit `X_PM1a_CNT_BLK`'s
+    /// where that is set -- 0, out of reach, where it is set outside I/O
+    /// space -- else the legacy field's. So for every block below.
     pub pm1a_cnt_blk: u16,
-    /// PM1b Control Block port address (0 if not present).
+    /// PM1b Control Block port address (0 if not present), as
+    /// `pm1a_cnt_blk`.
     pub pm1b_cnt_blk: u16,
     /// SLP_TYP value for S5 (shutdown) state.
     /// Extracted from DSDT \_S5 object, or default (5) if not found.
@@ -185,15 +188,14 @@ pub struct PowerInfo {
     /// SCI interrupt number.
     pub sci_irq: u16,
     /// The PM1a event block's I/O port, 0 where absent: its status register,
-    /// then its enable register, [`Self::pm1_evt_len`] bytes in all. The
-    /// 64-bit `X_PM1a_EVT_BLK`'s where that is set, else the legacy field's.
+    /// then its enable register, [`Self::pm1_evt_len`] bytes in all.
     pub pm1a_evt_blk: u16,
     /// The PM1b event block's I/O port, 0 where absent, as `pm1a_evt_blk`.
     pub pm1b_evt_blk: u16,
     /// Each PM1 event block's length in bytes, both registers.
     pub pm1_evt_len: u8,
     /// The GPE0 block's I/O port, 0 where absent: status bytes, then as many
-    /// enable bytes. The 64-bit `X_GPE0_BLK`'s where that is set.
+    /// enable bytes.
     pub gpe0_blk: u16,
     /// The GPE0 block's length in bytes, both halves.
     pub gpe0_blk_len: u8,
@@ -271,12 +273,6 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
     let total_len = header.length as usize;
 
     serial_println!(
-        "[acpi]   PM1a_CNT: {:#x}, PM1b_CNT: {:#x}, SCI: IRQ {}",
-        pm1a,
-        pm1b,
-        sci_irq
-    );
-    serial_println!(
         "[acpi]   Flags: {:#010x} (RESET_REG_SUP={})",
         flags,
         (flags >> 10) & 1
@@ -322,11 +318,14 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
         };
 
     serial_println!("[acpi]   DSDT at phys={:#x}", dsdt_phys);
-    // ACPI 2.0's 64-bit register blocks, which the OS is to use where they
-    // are set (ACPI 6.5 5.2.9): an I/O-space one's port wins over the legacy
-    // field, whose length stands unless it is 0, when the block's bit width
-    // gives it. One in another address space is none this module can reach.
-    let x_block = |offset: usize, legacy: u16, legacy_len: u8| -> (u16, u8) {
+    // ACPI 2.0's 64-bit register blocks, which supersede the legacy fields
+    // wherever they are set (ACPI 6.5 5.2.9): an I/O-space one's port is
+    // used, with the legacy field's length unless that is 0, when the
+    // block's bit width gives it. One set beyond the I/O ports -- in memory,
+    // say -- is out of reach of this module, which knows the blocks only as
+    // ports: it is none, said, and the legacy field, which the spec then
+    // says to ignore, is not used in its place.
+    let x_block = |name: &str, offset: usize, legacy: u16, legacy_len: u8| -> (u16, u8) {
         if total_len < offset.saturating_add(core::mem::size_of::<GenericAddress>()) {
             return (legacy, legacy_len);
         }
@@ -337,8 +336,11 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
             )
         };
         let (space, address, width) = (gas.address_space, gas.address, gas.bit_width);
+        if address == 0 {
+            return (legacy, legacy_len);
+        }
         match u16::try_from(address) {
-            Ok(x) if space == 1 && x != 0 => (
+            Ok(x) if space == 1 => (
                 x,
                 if legacy_len != 0 {
                     legacy_len
@@ -346,19 +348,37 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
                     width / 8
                 },
             ),
-            _ => (legacy, legacy_len),
+            _ => {
+                serial_println!(
+                    "[acpi]   X_{name}: address space {space}, address {address:#x}, beyond SlateOS's reach: no {name}"
+                );
+                (0, 0)
+            }
         }
     };
-    let (pm1a_evt, pm1_evt_len) = x_block(FADT_X_PM1A_EVT_OFFSET, pm1a_evt, pm1_evt_len);
-    let (pm1b_evt, _) = x_block(FADT_X_PM1B_EVT_OFFSET, pm1b_evt, pm1_evt_len);
-    let (pm1a, _) = x_block(FADT_X_PM1A_CNT_OFFSET, pm1a, 0);
-    let (pm1b, _) = x_block(FADT_X_PM1B_CNT_OFFSET, pm1b, 0);
-    let (gpe0, gpe0_len) = x_block(FADT_X_GPE0_OFFSET, gpe0, gpe0_len);
-    let (gpe1, gpe1_len) = x_block(FADT_X_GPE1_OFFSET, gpe1, gpe1_len);
+    let (pm1a_evt, pm1_evt_len) = x_block(
+        "PM1a_EVT_BLK",
+        FADT_X_PM1A_EVT_OFFSET,
+        pm1a_evt,
+        pm1_evt_len,
+    );
+    let (pm1b_evt, _) = x_block(
+        "PM1b_EVT_BLK",
+        FADT_X_PM1B_EVT_OFFSET,
+        pm1b_evt,
+        pm1_evt_len,
+    );
+    let (pm1a, _) = x_block("PM1a_CNT_BLK", FADT_X_PM1A_CNT_OFFSET, pm1a, 0);
+    let (pm1b, _) = x_block("PM1b_CNT_BLK", FADT_X_PM1B_CNT_OFFSET, pm1b, 0);
+    let (gpe0, gpe0_len) = x_block("GPE0_BLK", FADT_X_GPE0_OFFSET, gpe0, gpe0_len);
+    let (gpe1, gpe1_len) = x_block("GPE1_BLK", FADT_X_GPE1_OFFSET, gpe1, gpe1_len);
     let hw_reduced = flags & (1 << 20) != 0;
     let fixed_power_button = flags & (1 << 4) == 0;
     serial_println!(
-        "[acpi]   PM1a_EVT: {:#x}, PM1b_EVT: {:#x} (len {}), GPE0: {:#x} (len {}), GPE1: {:#x} (len {}), SMI_CMD: {:#x}, ACPI_ENABLE: {:#x}, ACPI_DISABLE: {:#x}, power button {}{}",
+        "[acpi]   PM1a_CNT: {:#x}, PM1b_CNT: {:#x}, SCI: IRQ {}, PM1a_EVT: {:#x}, PM1b_EVT: {:#x} (len {}), GPE0: {:#x} (len {}), GPE1: {:#x} (len {}), SMI_CMD: {:#x}, ACPI_ENABLE: {:#x}, ACPI_DISABLE: {:#x}, power button {}{}",
+        pm1a,
+        pm1b,
+        sci_irq,
         pm1a_evt,
         pm1b_evt,
         pm1_evt_len,

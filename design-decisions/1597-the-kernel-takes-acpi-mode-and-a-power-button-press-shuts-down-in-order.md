@@ -15,34 +15,47 @@ what the default should be is open-questions A-Q32.
 **What was done** (`kernel/src/acpi/events.rs`; known-issues
 A-THE-POWER-BUTTON-NEVER-REACHES-THE-KERNEL):
 
-1. **ACPI mode is the kernel's**, where the FADT describes a fixed power
-   button (flag `PWR_BUTTON` clear, not hardware-reduced). At boot the
-   kernel logs whether the firmware handed the chipset over in ACPI mode
-   (PM1 control's `SCI_EN`). Everything that can fail is settled first: the
-   SCI's pin and sense, and the work queue. Only then, if the firmware kept
-   legacy mode, does the kernel write the FADT's `ACPI_ENABLE` to its SMI
-   command port and wait up to 3 s for `SCI_EN`, as ACPICA does. Should the
-   SCI then fail to route, ACPI mode is given back (`ACPI_DISABLE`) and the
-   firmware has the button again. In legacy mode the firmware acts on the
-   button itself, which on the test PC means an immediate power cut. The
-   PM1 and GPE blocks are read from the FADT's 64-bit fields where those
-   are set, else from the legacy ones.
+1. **ACPI mode is the kernel's**, on any platform that is not
+   hardware-reduced. At boot the kernel logs whether the firmware handed
+   the chipset over in ACPI mode (PM1 control's `SCI_EN`, or no SMI command
+   port at all). Everything that can be checked is checked first: the SCI's
+   pin (one the I/O APIC really has), whose sense `ioapic::init` set, and
+   the work queue. Only then, if the firmware kept legacy mode, does the
+   kernel write the FADT's `ACPI_ENABLE` to its SMI command port and wait
+   up to 3 s for `SCI_EN`, as ACPICA does; a FADT whose `ACPI_ENABLE` and
+   `ACPI_DISABLE` are both 0 offers no switch, and nothing is written.
+   Should the SCI then fail to unmask, every enable register the kernel
+   rewrote is put back as the firmware had it, ACPI mode is given back
+   (`ACPI_DISABLE`), and the firmware has the button again. In legacy mode
+   the firmware acts on the button itself, which on the test PC means an
+   immediate power cut. A button the FADT makes a control-method device
+   (flag `PWR_BUTTON`), which needs AML, is left to the firmware where the
+   firmware kept legacy mode; where ACPI mode is the OS's already the
+   firmware will not act on it, so its fixed event is armed all the same.
+   The PM1 and GPE blocks are read from the FADT's 64-bit fields where
+   those are set, else from the legacy ones; a 64-bit block set outside I/O
+   space is out of reach, and treated as absent.
 2. **Only the power button's event is enabled.** Every general-purpose
    event (GPE) is disabled and its status cleared, and so is every fixed
    event's status. SlateOS runs no AML, so it could answer no GPE, and a
-   level-triggered SCI left asserted by one would never stop.
+   level-triggered SCI left asserted by one would never stop. Of PM1
+   enable's bits only the five that let a fixed event raise the SCI are
+   written; `PCIEXP_WAKE_DIS` and the reserved bits stay as they were.
 3. **The SCI** (ISA IRQ from the FADT, through any MADT override; each
    field the override leaves conforming is ACPI's SCI default,
    level-triggered and active-low) is routed to a handler that clears the
    button's status before the EOI and hands the press to the kernel work
-   queue. It also turns off any GPE it finds firing, one the firmware
-   enabled again, whose level would otherwise hold the SCI asserted.
+   queue. It also turns off any other event, fixed or general-purpose, it
+   finds enabled and firing, one the firmware enabled again, whose level
+   would otherwise hold the SCI asserted until the storm guard masked the
+   pin, the button's with it.
 4. **What a press does** is the power policy's
    (`fs::power::handle_power_button`): shut down runs
    `initproc::shutdown(PowerButton)` -- the kernel's service table marked
    stopped, filesystems synced, logs flushed; no program is asked to stop
    -- then `power::shutdown()`, the S5 power-off. A press while a shutdown
-   is already under way adds nothing to it. Sleep and hibernation, which
+   is already under way adds nothing to it; one after a shutdown that
+   halted without powering off powers off. Sleep and hibernation, which
    SlateOS cannot do, shut down instead, saying so. The screen off,
    log-out and lock screen, which it cannot do either and which are no way
    of stopping, do nothing, saying so.
@@ -68,6 +81,7 @@ that costs nothing visible; on a laptop the lid and battery are not
 reported. Every boot test presses the button through QEMU's
 `system_powerdown` (`scripts/boot-test.sh`, `pwrbtn_responder`), with
 `acpi.pwrbtn=hmp` making every press the harness's, recorded and never
-acted on. It requires the press to reach the kernel's worker, and first
+acted on. It requires the press to reach the kernel's worker. First it
 gives ACPI mode back and takes it again, which is the handoff a PC in
-legacy mode needs.
+legacy mode needs, and enables the PM timer's fixed event behind the
+kernel's back, which the SCI's handler must turn off when it fires.

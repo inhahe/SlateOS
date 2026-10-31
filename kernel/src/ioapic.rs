@@ -556,6 +556,15 @@ pub unsafe fn init() -> KernelResult<()> {
     // ISA IRQ 9 → level-triggered active-low).
     let overrides = crate::acpi::interrupt_overrides();
 
+    // The ACPI SCI's pin is programmed as ACPI defines the SCI: each field
+    // its override leaves conforming -- or both, with no override -- is
+    // level-triggered and active-low, not the ISA bus's edge and
+    // active-high (`acpi::events::sci_sense`, as Linux's
+    // `acpi_sci_ioapic_setup`).
+    let sci = crate::acpi::events::sci_irq().and_then(|irq| u8::try_from(irq).ok());
+    let sci_override =
+        sci.and_then(|irq| overrides.iter().find(|o| o.bus == 0 && o.source_irq == irq));
+    let sci_pin = sci.map(|irq| sci_override.map_or(u32::from(irq), |o| o.gsi));
     for irq in 0..usable {
         #[allow(clippy::cast_possible_truncation)]
         let irq_u8 = irq as u8;
@@ -563,20 +572,30 @@ pub unsafe fn init() -> KernelResult<()> {
         // Destination LAPIC ID 0 in bits [63:56].
         let mut entry = vector | REDIR_MASKED;
 
-        // Check if this IOAPIC input has an ACPI interrupt source
-        // override that changes the trigger mode or polarity.
-        // The override GSI tells us which IOAPIC pin to configure,
-        // but the trigger/polarity flags must be applied to the
-        // redirection entry for that pin.
-        for ovr in &overrides {
-            if ovr.gsi as usize == irq {
-                if ovr.is_level_triggered() {
-                    entry |= REDIR_LEVEL_TRIGGER;
+        if sci_pin.is_some_and(|pin| pin as usize == irq) {
+            let (level, active_low) = crate::acpi::events::sci_sense(sci_override.map(|o| o.flags));
+            if level {
+                entry |= REDIR_LEVEL_TRIGGER;
+            }
+            if active_low {
+                entry |= REDIR_ACTIVE_LOW;
+            }
+        } else {
+            // Check if this IOAPIC input has an ACPI interrupt source
+            // override that changes the trigger mode or polarity.
+            // The override GSI tells us which IOAPIC pin to configure,
+            // but the trigger/polarity flags must be applied to the
+            // redirection entry for that pin.
+            for ovr in &overrides {
+                if ovr.gsi as usize == irq {
+                    if ovr.is_level_triggered() {
+                        entry |= REDIR_LEVEL_TRIGGER;
+                    }
+                    if ovr.is_active_low() {
+                        entry |= REDIR_ACTIVE_LOW;
+                    }
+                    break;
                 }
-                if ovr.is_active_low() {
-                    entry |= REDIR_ACTIVE_LOW;
-                }
-                break;
             }
         }
 
@@ -658,6 +677,13 @@ pub unsafe fn unmask_irq(irq: u8) -> bool {
     true
 }
 
+/// How many pins -- redirection entries -- the I/O APIC has that the kernel
+/// programs: the pins [`unmask_irq`] and the rest accept. 0 before `init`.
+#[must_use]
+pub fn pins() -> usize {
+    usize::try_from(NUM_REDIR_ENTRIES.load(Ordering::Acquire)).unwrap_or(0)
+}
+
 /// Mask (disable) an IOAPIC IRQ line.
 pub fn mask_irq(irq: u8) {
     let num = NUM_REDIR_ENTRIES.load(Ordering::Acquire);
@@ -710,38 +736,6 @@ pub unsafe fn set_level_triggered(irq: u8) {
     // SAFETY: IOAPIC is initialized, irq < num_entries; the window is not
     // held.
     unsafe { route(irq, |entry| entry | REDIR_LEVEL_TRIGGER | REDIR_ACTIVE_LOW) };
-}
-
-/// Program pin `irq`'s trigger mode -- level (`level`) or edge -- and its
-/// polarity -- active-low (`active_low`) or active-high -- nothing else
-/// about it changed: for a line whose owner knows its sense better than
-/// the MADT's overrides said (the ACPI SCI, whose fields an override
-/// leaves conforming are level and active-low). Nothing for a pin past the
-/// I/O APIC's.
-///
-/// # Safety
-///
-/// As [`set_level_triggered`]: the I/O APIC is initialized.
-pub unsafe fn set_trigger_polarity(irq: u8, level: bool, active_low: bool) {
-    let num = NUM_REDIR_ENTRIES.load(Ordering::Acquire);
-    if u64::from(irq) >= num {
-        return;
-    }
-    let sense = move |entry: u64| {
-        let entry = if level {
-            entry | REDIR_LEVEL_TRIGGER
-        } else {
-            entry & !REDIR_LEVEL_TRIGGER
-        };
-        if active_low {
-            entry | REDIR_ACTIVE_LOW
-        } else {
-            entry & !REDIR_ACTIVE_LOW
-        }
-    };
-    // SAFETY: IOAPIC is initialized, irq < num_entries; the window is not
-    // held.
-    unsafe { route(irq, sense) };
 }
 
 /// Set the CPU affinity for an IRQ — route it to a specific LAPIC.

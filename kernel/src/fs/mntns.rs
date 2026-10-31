@@ -19,10 +19,13 @@
 //! (`fs::Vfs::drop_mount_table`).
 //!
 //! As the UTS namespace is, a mount namespace is a process's here and a
-//! thread's on Linux (design-decisions 1554).
+//! thread's on Linux (design-decisions 1554). A task may still resolve its
+//! paths in another for a while ([`in_namespace`]): the kernel placing files
+//! where only one process's namespace reaches them, before it runs.
 
 use crate::error::{KernelError, KernelResult};
 use crate::proc::pcb::ProcessId;
+use crate::sched::task::TaskId;
 use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -53,6 +56,14 @@ static OTHERS: AtomicUsize = AtomicUsize::new(0);
 
 /// The next id to give.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The tasks inside [`in_namespace`] now, each with the namespaces it
+/// entered, the innermost last. A leaf lock, asked by [`current`].
+static ENTERED: Mutex<BTreeMap<TaskId, Vec<MntNsId>>> = Mutex::named(BTreeMap::new(), b"MNTNSENT");
+
+/// How many tasks are inside [`in_namespace`] now, so [`current`] answers
+/// without its lock in the common case of none.
+static ENTERING: AtomicUsize = AtomicUsize::new(0);
 
 /// Whether any namespace besides the root exists.
 #[must_use]
@@ -102,7 +113,8 @@ pub fn of_process(pid: ProcessId) -> MntNsId {
     MEMBERS.lock().get(&pid).copied().unwrap_or(ROOT)
 }
 
-/// The mount namespace the calling task resolves paths in: its process's;
+/// The mount namespace the calling task resolves paths in: the one it last
+/// entered with [`in_namespace`], if it is inside one; else its process's,
 /// the root for a kernel task, and for a task acting with the kernel's
 /// authority (`proc::thread::as_kernel`), as `ipc::namespace` resolves its
 /// paths.
@@ -111,9 +123,57 @@ pub fn current() -> MntNsId {
     if !any() {
         return ROOT;
     }
-    crate::proc::thread::acting_process(crate::sched::current_task_id())
+    let task = crate::sched::current_task_id();
+    if ENTERING.load(Ordering::Acquire) != 0
+        && let Some(&ns) = ENTERED.lock().get(&task).and_then(|entered| entered.last())
+    {
+        return ns;
+    }
+    crate::proc::thread::acting_process(task)
         .filter(|&pid| pid != 0)
         .map_or(ROOT, of_process)
+}
+
+/// `body` run with the calling task resolving every path in namespace `ns`
+/// -- each lookup, mount and pin it makes -- rather than in its process's
+/// (the root, for a kernel task), as Linux's `setns(CLONE_NEWNS)` would
+/// move a thread, and moved back after. Nothing else about the task
+/// changes: a kernel task stays one, judged by no permission gate. For the
+/// kernel placing files in a namespace of a process's own before the
+/// process runs, where no other namespace reaches them (`linuxdrv`'s WiFi
+/// network file). `ns` is held for the length of `body`. Nests: an inner
+/// call ends only its own part.
+///
+/// # Errors
+///
+/// `NotFound`, `body` not run, for an `ns` that does not exist.
+pub fn in_namespace<R>(ns: MntNsId, body: impl FnOnce() -> R) -> KernelResult<R> {
+    if !retain(ns) {
+        return Err(KernelError::NotFound);
+    }
+    let task = crate::sched::current_task_id();
+    {
+        let mut entered = ENTERED.lock();
+        let stack = entered.entry(task).or_default();
+        if stack.is_empty() {
+            ENTERING.fetch_add(1, Ordering::AcqRel);
+        }
+        stack.push(ns);
+    }
+    let result = body();
+    {
+        let mut entered = ENTERED.lock();
+        let ended = entered.get_mut(&task).is_some_and(|stack| {
+            stack.pop();
+            stack.is_empty()
+        });
+        if ended {
+            entered.remove(&task);
+            ENTERING.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    release(ns);
+    Ok(result)
 }
 
 /// A new namespace with a copy of `from`'s table, held once by the caller
@@ -296,6 +356,10 @@ pub fn self_test() -> KernelResult<()> {
     let survives = crate::fs::Vfs::mount_count_in(ns) == root_mounts.saturating_add(1);
     release(ns);
     let gone = crate::fs::Vfs::mount_count_in(ns) == 0 && !HOLDS.lock().contains_key(&ns);
+    // A kernel task inside a namespace resolves its paths there, and only
+    // while it is: a mount made inside lands in that namespace's table, and
+    // the root's own lookups never see it.
+    let entered = entered_check()?;
     if !copied {
         return fail("a new namespace did not start with a copy of the root's mounts");
     }
@@ -305,6 +369,45 @@ pub fn self_test() -> KernelResult<()> {
     if !(held && survives && gone) {
         return fail("a namespace's table did not live exactly as long as its holds");
     }
-    serial_println!("[mntns]   a copy of the table, a private mount, freed with the last hold: OK");
+    if let Some(what) = entered {
+        return fail(what);
+    }
+    serial_println!(
+        "[mntns]   a copy of the table, a private mount, freed with the last hold; a kernel task's paths resolved in a namespace it entered, and only while it was in it: OK"
+    );
     Ok(())
+}
+
+/// [`in_namespace`] checked: what was not so, `None` when all was.
+///
+/// # Errors
+///
+/// [`create_from`]'s.
+fn entered_check() -> KernelResult<Option<&'static str>> {
+    use crate::fs::Vfs;
+    const AT: &str = "/mntns-selftest-entered";
+    let ns = create_from(ROOT)?;
+    let inside = in_namespace(ns, || {
+        let here = current();
+        let mounted = Vfs::mount(AT, alloc::boxed::Box::new(crate::fs::memfs::MemFs::new()));
+        (here, mounted.is_ok(), Vfs::is_mount_point(AT))
+    });
+    let (in_root, after) = (Vfs::is_mount_point(AT), current());
+    let in_ns = Vfs::mounts_full_in(ns)
+        .iter()
+        .any(|(path, _, _)| path.as_path() == crate::fs::path::Path::new(AT));
+    let nested = in_namespace(ns, || {
+        in_namespace(ROOT, current).ok() == Some(ROOT) && current() == ns
+    });
+    release(ns);
+    let missing = in_namespace(ns, current);
+    Ok(match inside {
+        _ if missing.is_ok() => Some("a namespace that is gone was entered"),
+        Ok((here, true, true)) if here == ns && in_ns && !in_root && after == ROOT => {
+            (nested != Ok(true)).then_some("a nested namespace did not end only its own part")
+        }
+        _ => Some(
+            "a kernel task inside a namespace did not resolve its paths there, or kept doing so after",
+        ),
+    })
 }

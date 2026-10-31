@@ -113,12 +113,29 @@ pub const DRIVER_GID: u32 = 65_533;
 ///
 /// # Errors
 ///
-/// The spawn's; `InternalError`, said, for a driver process that is root
-/// all the same.
+/// [`start_in`]'s.
 fn start(
     program: &Program<'_>,
     argv: &[&[u8]],
     capabilities: &[(ResourceType, u64, Rights)],
+) -> KernelResult<spawn::SpawnResult> {
+    start_in(program, argv, capabilities, crate::fs::mntns::ROOT)
+}
+
+/// [`start`], the process in mount namespace `ns` from its first
+/// instruction -- holding `ns` for as long as it lives -- and checked not to
+/// be root before it runs one.
+///
+/// # Errors
+///
+/// The spawn's; `InternalError`, said, for a driver process that would be
+/// root all the same; `NotFound` for an `ns` that does not exist. Nothing of
+/// the process is left after any.
+fn start_in(
+    program: &Program<'_>,
+    argv: &[&[u8]],
+    capabilities: &[(ResourceType, u64, Rights)],
+    ns: crate::fs::mntns::MntNsId,
 ) -> KernelResult<spawn::SpawnResult> {
     const PATH_KEY: &[u8] = b"firmware_class.path=";
     // Outlives `args`, which borrows it; made only when it is passed.
@@ -147,7 +164,15 @@ fn start(
             groups: &[],
         }),
     };
-    let process = spawn::spawn_process(program.elf, &options)?;
+    // Unstarted, and undone if dropped so: every refusal below leaves nothing.
+    let process = spawn::spawn_process_suspended(
+        program.elf,
+        &options,
+        None,
+        &[],
+        spawn::CapInherit::All,
+        spawn::SpawnAttrs::default(),
+    )?;
     // Not root by any id: user, group or supplementary group, real,
     // effective, saved or the filesystem's own.
     let root = |c: pcb::ProcessCredentials| {
@@ -156,16 +181,22 @@ fn start(
             || [c.gid, c.rgid, c.sgid, c.fsgid].contains(&0)
             || c.groups.contains(&0)
     };
-    if program.driver && pcb::get_credentials(process.pid).is_none_or(root) {
+    if program.driver && pcb::get_credentials(process.pid()).is_none_or(root) {
         serial_println!(
-            "[linuxdrv]   FAIL: the driver process {} (pid {}) runs as root",
+            "[linuxdrv]   FAIL: the driver process {} (pid {}) would run as root",
             program.name,
-            process.pid
+            process.pid()
         );
-        spawn::teardown_fixture(process.pid, process.task_id);
         return Err(KernelError::InternalError);
     }
-    Ok(process)
+    if ns != crate::fs::mntns::ROOT {
+        // The process's own hold, which its end gives up.
+        if !crate::fs::mntns::retain(ns) {
+            return Err(KernelError::NotFound);
+        }
+        crate::fs::mntns::set_process(process.pid(), ns);
+    }
+    process.start()
 }
 
 /// How `process`, started from `program`, ended within `program`'s limit
@@ -566,10 +597,14 @@ fn wifi_runs(
         },
     )?;
     if BOOT_WIFI_CARRIED.load(core::sync::atomic::Ordering::Acquire) {
-        // Placed for the join alone, and dropped whatever it came to (the
-        // join drops it as soon as its driver has read it).
-        let ran = place_boot_wifi().and_then(|network| wifi_join_run(elf, &arg, &caps, network));
+        // Placed for the join alone, in the joining driver's own namespace,
+        // and dropped whatever it came to (the join drops it as soon as its
+        // driver has read it).
+        let ns = crate::fs::mntns::create_from(crate::fs::mntns::ROOT)?;
+        let ran =
+            place_boot_wifi(ns).and_then(|network| wifi_join_run(elf, &arg, &caps, network, ns));
         let dropped = drop_boot_wifi();
+        crate::fs::mntns::release(ns);
         ran?;
         dropped?;
     } else {
@@ -585,7 +620,8 @@ fn wifi_runs(
 const WIFI_SERVICE: &[u8] = b"nic.wifi";
 
 /// The card's network joined and served (design-decisions 1596): Linux's
-/// mt7925e started with `join=` the network file ([`WIFI_NETWORK`]) -- holding the right to
+/// mt7925e started in mount namespace `ns`, the one the network file
+/// ([`WIFI_NETWORK`]) was placed in, with `join=` the file -- holding the right to
 /// read it (`network`, [`place_boot_wifi`]), dropped as soon as the process
 /// has served the card or ended ([`drop_boot_wifi`]), beside the card's and its
 /// firmware's (`capabilities`) -- joining the network the file names, then
@@ -605,6 +641,7 @@ fn wifi_join_run(
     pci: &str,
     capabilities: &[(ResourceType, u64, Rights)],
     network: (ResourceType, u64, Rights),
+    ns: crate::fs::mntns::MntNsId,
 ) -> KernelResult<()> {
     /// How long firmware, a scan and a join may take before the card is
     /// served: the driver process's own worst case, which it says the end
@@ -625,7 +662,7 @@ fn wifi_join_run(
         limit_s: WIFI_JOIN_S + 120,
         poll_ms: 0,
     };
-    let driver = start(
+    let driver = start_in(
         &program,
         &[
             b"mt7925e",
@@ -635,6 +672,7 @@ fn wifi_join_run(
             b"stacks=2",
         ],
         &caps,
+        ns,
     )?;
     let fail = |what: &str, driver: &spawn::SpawnResult| {
         let ended = stop(driver);
@@ -977,9 +1015,10 @@ pub fn mount_boot_firmware() -> KernelResult<(usize, usize)> {
 
 /// Where the boot medium's WiFi network file is put while a WiFi driver
 /// process joins by it ([`place_boot_wifi`]): a mount point of its own, as
-/// [`BOOT_FIRMWARE_DIR`] is, sealed read-only, which only the joining
-/// process is given the right to read beneath, and unmounted as soon as it
-/// has ([`drop_boot_wifi`], design-decisions 1596).
+/// [`BOOT_FIRMWARE_DIR`] is, sealed read-only, in the joining process's own
+/// mount namespace alone, which only that process is given the right to read
+/// beneath, and unmounted as soon as it has ([`drop_boot_wifi`],
+/// design-decisions 1596).
 pub const BOOT_WIFI_DIR: &str = "/.boot-wifi";
 /// The `module_cmdline:` prefix that makes a module one of [`BOOT_WIFI_DIR`]'s
 /// files, what follows it the file's path there.
@@ -1032,22 +1071,33 @@ pub fn note_boot_wifi() -> bool {
 
 /// The boot medium's WiFi files -- every module limine.conf names
 /// `wifi/<path>` -- placed at `<path>` under [`BOOT_WIFI_DIR`], on a memfs
-/// that zeroes them as it goes ([`mount_boot_files`]), for a WiFi driver
-/// process about to join by them,
-/// and the right to read beneath it, a tree ([`crate::fs::trees`]) for that
-/// process alone; [`drop_boot_wifi`] takes them away again.
+/// that zeroes them as it goes ([`mount_boot_files`]), in mount namespace
+/// `ns` alone -- the one a WiFi driver process about to join by them is
+/// started in ([`start_in`]), so that no path from any other namespace names
+/// them, whatever capability its process holds -- and the right to read
+/// beneath it, a tree ([`crate::fs::trees`]) for that process alone;
+/// [`drop_boot_wifi`] takes them away again.
 ///
 /// # Errors
 ///
 /// `NotFound` when there is no network file to place: the boot medium
 /// carries none ([`note_boot_wifi`]), or it was wiped already
-/// ([`drop_boot_wifi`]). [`mount_boot_files`]', or the tree registry's,
-/// said: a directory placed and not a tree is the kernel's own fault. What
-/// was mounted stays for [`drop_boot_wifi`] to take away.
-fn place_boot_wifi() -> KernelResult<(ResourceType, u64, Rights)> {
+/// ([`drop_boot_wifi`]), or `ns` is gone. [`mount_boot_files`]', or the
+/// tree registry's, said: a directory placed and not a tree is the kernel's
+/// own fault. What was mounted stays for [`drop_boot_wifi`] to take away.
+fn place_boot_wifi(ns: crate::fs::mntns::MntNsId) -> KernelResult<(ResourceType, u64, Rights)> {
     if !BOOT_WIFI_CARRIED.load(core::sync::atomic::Ordering::Acquire) {
         return Err(KernelError::NotFound);
     }
+    crate::fs::mntns::in_namespace(ns, place_boot_wifi_here)?
+}
+
+/// [`place_boot_wifi`]'s placing, in the caller's mount namespace.
+///
+/// # Errors
+///
+/// [`place_boot_wifi`]'s but the first.
+fn place_boot_wifi_here() -> KernelResult<(ResourceType, u64, Rights)> {
     let placed = mount_boot_files(WIFI_MODULE, BOOT_WIFI_DIR, "WiFi", true)?;
     // Its identity, as its mount gave it -- not looked up after, when
     // something else could be mounted on top -- which the drop detaches it
@@ -1145,9 +1195,11 @@ pub fn drop_boot_wifi_before_init() {
 }
 
 /// The boot medium's WiFi network file placed and dropped as a join run
-/// places and drops it, with no card to join by it: placed, a tree over
-/// its directory given and the file at its path, as long as its module;
-/// dropped -- a mount namespace made while it was placed, as by a process
+/// places and drops it, with no card to join by it: placed in a mount
+/// namespace of its own, as for the joining driver, a tree over its
+/// directory given and the file at its path there, as long as its module,
+/// and no file at that path in the root's namespace; dropped -- a
+/// namespace copied from that one while it was placed, as by the driver
 /// unsharing during a join, holding a copy of its mount, and a mount
 /// stacked on it at its path, as `mount(2)` stacks one -- its filesystem
 /// mounted nowhere, the stacked mount gone with it, the path naming
@@ -1161,6 +1213,7 @@ pub fn drop_boot_wifi_before_init() {
 ///
 /// `InternalError`, said, for any part not so.
 fn wifi_placement_check() -> KernelResult<()> {
+    use crate::fs::mntns;
     use crate::fs::vfs::Vfs;
     let module: alloc::vec::Vec<u8> = [WIFI_MODULE, WIFI_NETWORK.as_bytes()].concat();
     let len = crate::boot::module(&module)
@@ -1175,35 +1228,52 @@ fn wifi_placement_check() -> KernelResult<()> {
                 .and_then(|n| sum.checked_add(n))
         });
     let wiped_before = crate::fs::memfs::wiped_bytes_on_drop();
-    let placed = place_boot_wifi();
-    let held = Vfs::metadata(wifi_network_file().as_str()).map(|m| m.size);
+    // The joining driver's own namespace, as the join makes it: the file is
+    // placed there, and every look at it from there is made inside it.
+    let ns = mntns::create_from(mntns::ROOT)?;
+    let inside =
+        |look: &dyn Fn() -> KernelResult<u64>| mntns::in_namespace(ns, look).and_then(|r| r);
+    let size = || Vfs::metadata(wifi_network_file().as_str()).map(|m| m.size);
+    let placed = place_boot_wifi(ns);
+    let held = inside(&size);
+    // No other namespace's path names it, the root's least of all.
+    let seen = size();
     let fs_id = BOOT_WIFI_FS.load(core::sync::atomic::Ordering::Acquire);
-    // A namespace made while it is placed holds a copy of its mount, and a
-    // mount stacked on it hides it at its path: the drop must take both.
-    let copy = crate::fs::mntns::create_from(crate::fs::mntns::ROOT);
-    let stacked = Vfs::mount_on_top(
-        BOOT_WIFI_DIR,
-        alloc::boxed::Box::new(crate::fs::memfs::MemFs::new()),
-        crate::fs::vfs::MountOptions::defaults(),
-    );
+    // A namespace made from the driver's while it is placed, as by the
+    // driver unsharing, holds a copy of its mount, and a mount stacked on it
+    // hides it at its path: the drop must take both.
+    let copy = mntns::create_from(ns);
+    let stacked = mntns::in_namespace(ns, || {
+        Vfs::mount_on_top(
+            BOOT_WIFI_DIR,
+            alloc::boxed::Box::new(crate::fs::memfs::MemFs::new()),
+            crate::fs::vfs::MountOptions::defaults(),
+        )
+    })
+    .and_then(|r| r);
     let dropped = drop_boot_wifi();
-    let stacked_left = Vfs::is_mount_point(BOOT_WIFI_DIR);
+    let stacked_left =
+        mntns::in_namespace(ns, || Vfs::is_mount_point(BOOT_WIFI_DIR)).unwrap_or(true);
     // What a failing drop left at the path, taken away: the check's own.
-    for _ in 0..4 {
-        if !Vfs::is_mount_point(BOOT_WIFI_DIR) || Vfs::unmount_detach(BOOT_WIFI_DIR).is_err() {
-            break;
+    // Its failure only leaves the namespace's table to go with the namespace.
+    let _ = mntns::in_namespace(ns, || {
+        for _ in 0..4 {
+            if !Vfs::is_mount_point(BOOT_WIFI_DIR) || Vfs::unmount_detach(BOOT_WIFI_DIR).is_err() {
+                break;
+            }
         }
-    }
+    });
     let after = (
         fs_id != 0 && Vfs::filesystem_mounted(fs_id),
-        Vfs::metadata(wifi_network_file().as_str()).map(|m| m.size),
+        inside(&size),
         crate::fs::memfs::wiped_bytes_on_drop().wrapping_sub(wiped_before),
         crate::boot::module(&module).map(|bytes| bytes.iter().all(|&b| b == 0)),
-        place_boot_wifi(),
+        place_boot_wifi(ns),
     );
-    if let Ok(ns) = copy {
-        crate::fs::mntns::release(ns);
+    if let Ok(copy) = copy {
+        mntns::release(copy);
     }
+    mntns::release(ns);
     let tree = matches!(placed, Ok((ResourceType::FileTree, _, rights)) if rights == Rights::READ);
     let as_long = len.is_some_and(|n| Ok(n) == held);
     match after {
@@ -1215,6 +1285,7 @@ fn wifi_placement_check() -> KernelResult<()> {
             Err(KernelError::NotFound),
         ) if tree
             && as_long
+            && matches!(seen, Err(KernelError::NotFound))
             && fs_id != 0
             && copy.is_ok()
             && stacked.is_ok()
@@ -1223,13 +1294,13 @@ fn wifi_placement_check() -> KernelResult<()> {
             && all.is_some_and(|all| memfs_wiped >= all) =>
         {
             serial_println!(
-                "[linuxdrv]   the WiFi network file placed with no card to join by it, and dropped -- a namespace's copy of its mount and a mount stacked on it too: mounted nowhere, its path naming nothing, its {memfs_wiped} byte(s) zeroed in the memfs, its module wiped"
+                "[linuxdrv]   the WiFi network file placed with no card to join by it, in a namespace of its own that the root's paths do not reach, and dropped -- a copy of that namespace's mount and a mount stacked on it too: mounted nowhere, its path naming nothing, its {memfs_wiped} byte(s) zeroed in the memfs, its module wiped"
             );
             Ok(())
         }
         (mounted, size, memfs_wiped, wiped, again) => {
             serial_println!(
-                "[linuxdrv]   FAIL: the WiFi network file of {len:?} byte(s) placed {:?} (its size there {held:?}, its filesystem {fs_id}, a namespace copied {:?}, a mount stacked on it {stacked:?}), then dropped {dropped:?}: still mounted {mounted}, the stacked mount left {stacked_left}, its path {size:?}, {memfs_wiped} byte(s) zeroed in the memfs, its module wiped {wiped:?}, placed again {:?}",
+                "[linuxdrv]   FAIL: the WiFi network file of {len:?} byte(s) placed {:?} (its size there {held:?}, from the root's namespace {seen:?}, its filesystem {fs_id}, a namespace copied {:?}, a mount stacked on it {stacked:?}), then dropped {dropped:?}: still mounted {mounted}, the stacked mount left {stacked_left}, its path {size:?}, {memfs_wiped} byte(s) zeroed in the memfs, its module wiped {wiped:?}, placed again {:?}",
                 placed.map(|(kind, _, rights)| (kind, rights)),
                 copy.map(|_| ()),
                 again.map(|(kind, _, rights)| (kind, rights))

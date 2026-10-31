@@ -31,17 +31,18 @@ printed in a log.
    of the `File` capability, then by the boot's self-test processes run
    before the join). At boot the kernel only notes that the medium carries
    the file (`linuxdrv::note_boot_wifi`). It places it at `/.boot-wifi`
-   for the join run alone (`linuxdrv::place_boot_wifi`) and detaches its
-   mount the moment the joining process has served the card, or ended, or
-   run out of time (`linuxdrv::drop_boot_wifi`) -- and again, in case,
-   before init -- so that no other process can read it, root's included,
-   by any path, bind mount or syscall. While it is placed, a process
-   holding the general `File` capability could read it too, through the
-   root namespace; none runs then, since the joining driver is the only
-   process the boot has started at that point, the long-lived ones
-   starting after the self-tests (known-issues
-   A-THE-WIFI-FILE-IS-IN-THE-ROOT-NAMESPACE-WHILE-PLACED, for a join made
-   beside other processes). A driver started for the system's
+   for the join run alone (`linuxdrv::place_boot_wifi`), in a mount
+   namespace of the joining driver's own, which the driver is started in
+   before it runs an instruction (`linuxdrv::start_in`), so that no path
+   from any other namespace names it, whatever capability the asker holds
+   (`fs::mntns::in_namespace` places it there). It detaches its mount the
+   moment the joining process has served the card, or ended, or run out of
+   time (`linuxdrv::drop_boot_wifi`) -- and again, in case, before init --
+   so that no other process can read it, root's included, by any path,
+   bind mount or syscall. Until 2026-10-31 it was placed in the root
+   namespace, where a process holding the general `File` capability could
+   have read it while it was there (known-issues
+   A-THE-WIFI-FILE-IS-IN-THE-ROOT-NAMESPACE-WHILE-PLACED, fixed). A driver started for the system's
    life that must join again later will need the PMK kept for it
    (known-issues A-WIFI-REKEYS-AND-LOST-LINKS-ARE-NOT-ANSWERED).
 5. **Nor is it left in memory once read** (added after the second review,

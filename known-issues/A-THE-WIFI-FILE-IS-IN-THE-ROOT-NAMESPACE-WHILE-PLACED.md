@@ -1,6 +1,11 @@
 ## A-THE-WIFI-FILE-IS-IN-THE-ROOT-NAMESPACE-WHILE-PLACED (lane A, 2026-10-31) — OPEN
 
-**Status:** OPEN
+**Status:** OPEN -- fixed on lane-a-wip, awaiting a boot on main: the file is placed in a mount
+namespace of the joining driver's own (`fs::mntns::in_namespace`), which
+the driver is started in before it runs (`linuxdrv::start_in`), as the
+proper fix below says; every boot test checks the root's namespace does
+not reach it (`linuxdrv::wifi_placement_check`). Moves to
+known-issues-resolved, FIXED, once a boot on main has passed with it.
 
 **In short:** while a WiFi driver process joins the network the boot
 medium names, the kernel puts the network file, passphrase included, at

@@ -6746,34 +6746,24 @@ fn dhcp_settle(
 }
 
 /// The card's lease taken anew, the last one lost: an address by DHCP for
-/// `me` -- perhaps not the one it had -- and the client to keep it. An exit
-/// code (`netipc::nicport::check`) for none.
-fn retake_lease(me: &mut IfInfo) -> Result<dhcp_client::Client, i64> {
+/// `me` -- perhaps not the one it had -- waited for as the first one is
+/// ([`lease_for_life`]), and the client to keep it. An exit code
+/// (`netipc::nicport::check`) only when the card has gone.
+fn retake_lease(me: &mut IfInfo, service: &[u8]) -> Result<dhcp_client::Client, i64> {
     me.ip = [0; 4];
-    match dhcp_lease(me) {
-        Ok(lease) => {
-            loopback::set_my_ip(me.ip);
-            Line::new()
-                .put(b"[netstack] the card's lease was taken anew: ")
-                .ip(&me.ip)
-                .put(b"\n")
-                .print();
-            Ok(dhcp_client::Client::new(
-                me.mac,
-                lease,
-                now_ns(),
-                dhcp_xid(&me.mac),
-            ))
-        }
-        Err(why) => {
-            Line::new()
-                .put(b"[netstack] ")
-                .put(why.as_bytes())
-                .put(b"\n")
-                .print();
-            Err(NIC_LEASE)
-        }
-    }
+    let lease = lease_for_life(me, service)?;
+    loopback::set_my_ip(me.ip);
+    Line::new()
+        .put(b"[netstack] the card's lease was taken anew: ")
+        .ip(&me.ip)
+        .put(b"\n")
+        .print();
+    Ok(dhcp_client::Client::new(
+        me.mac,
+        lease,
+        now_ns(),
+        dhcp_xid(&me.mac),
+    ))
 }
 
 /// Our IPv6 link-local address announced to every node on the link: an
@@ -7228,48 +7218,31 @@ fn echo_answer(frame: &[u8], me: &IfInfo) -> Option<(usize, bool)> {
 /// (`netipc::nicport::check`) for what failed.
 ///
 /// `for_life` (`serve-net`, the daemon a running system's sockets go
-/// through): a card with no link yet, or a network whose DHCP server does
-/// not answer, is waited for rather than given up on -- tried again later
-/// and later yet, as a lost lease is ([`RETAKE_FIRST_NS`]), and at once when
-/// the link comes up: a cable plugged in after boot, or a WiFi network
-/// joined. Only the card going ends it then.
+/// through): the lease is waited for rather than given up on
+/// ([`lease_for_life`]). Only the card going ends it then.
 fn serve_card(service: &[u8], for_life: bool) -> Result<(IfInfo, dhcp_client::Client), i64> {
     let port = attach_card(service, b"serve")?;
     let mut me = card_if_info(port.mac);
-    let mut wait_ns = RETAKE_FIRST_NS;
-    let lease = loop {
+    let leased = if for_life {
+        lease_for_life(&mut me, service)
+    } else {
         // A bounded run is served only once its card's link is up, so it
-        // asks at once, as it always has.
-        let why = if !for_life || nic::link_up() {
-            match dhcp_lease(&mut me) {
-                Ok(lease) => break lease,
-                Err(why) => why,
-            }
-        } else {
-            "the card has no link"
-        };
-        Line::new()
-            .put(b"[netstack] serve: ")
-            .put(why.as_bytes())
-            .put(b"\n")
-            .print();
-        if !for_life {
+        // asks at once, and once.
+        dhcp_lease(&mut me).map_err(|why| {
+            Line::new()
+                .put(b"[netstack] serve: ")
+                .put(why.as_bytes())
+                .put(b"\n")
+                .print();
+            NIC_NO_ADDRESS
+        })
+    };
+    let lease = match leased {
+        Ok(lease) => lease,
+        Err(code) => {
             port::detach();
-            return Err(NIC_NO_ADDRESS);
+            return Err(code);
         }
-        Line::new()
-            .put(b"[netstack] serve: no address over ")
-            .put(service)
-            .put(b" yet: asked again within ")
-            .dec(wait_ns / 1_000_000_000)
-            .put(b" s, or as soon as its link comes up\n")
-            .print();
-        if !rest_until_link_up(&me, wait_ns) {
-            print("[netstack] serve: FAIL: the card's driver went away\n");
-            port::detach();
-            return Err(NIC_NO_CARD);
-        }
-        wait_ns = wait_ns.saturating_mul(2).min(RETAKE_MOST_NS);
     };
     Line::new()
         .put(b"[netstack] serving over ")
@@ -7290,19 +7263,74 @@ fn serve_card(service: &[u8], for_life: bool) -> Result<(IfInfo, dhcp_client::Cl
     Ok((me, client))
 }
 
-/// `ns` rested between two tries at a first lease, cut short when the card's
-/// link comes up -- a cable plugged in, a network joined -- that being when
-/// a try can first succeed. The frames that come meanwhile are read and let
-/// go: none is for an address not yet held, and one left unread would wake
-/// every wait at once. False when the card has gone.
-fn rest_until_link_up(me: &IfInfo, ns: u64) -> bool {
-    let deadline = now_ns().saturating_add(ns);
+/// How long a driver may take to tell the card's link once attached: it
+/// does so in the same turn as the attach message.
+const LINK_TOLD_WITHIN_NS: u64 = 2_000_000_000;
+
+/// A lease for `me` on the card `service` names, waited for for as long as
+/// it takes -- for the first one, and for one lost (`retake_lease`): a card
+/// with no link, or a network whose DHCP server does not answer, is asked
+/// again later and later yet ([`RETAKE_FIRST_NS`], doubling to
+/// [`RETAKE_MOST_NS`]), and at once when its link comes up -- a cable
+/// plugged in, a WiFi network joined. Not asked while the card has no link,
+/// a try that could only fail. Its link is judged once the driver has told
+/// it ([`nic::link_known`]). The lease, `me` holding its addresses; an exit
+/// code, `NIC_NO_CARD`, only when the card has gone.
+fn lease_for_life(me: &mut IfInfo, service: &[u8]) -> Result<dhcp_client::Lease, i64> {
+    let deadline = now_ns().saturating_add(LINK_TOLD_WITHIN_NS);
+    while !nic::link_known() && now_ns() < deadline {
+        drain_frames(me);
+        if nic::wait_until(deadline).is_err() {
+            break;
+        }
+    }
+    let mut wait_ns = RETAKE_FIRST_NS;
+    loop {
+        let why = if nic::link_up() {
+            match dhcp_lease(me) {
+                Ok(lease) => return Ok(lease),
+                Err(why) => why,
+            }
+        } else {
+            "the card has no link"
+        };
+        Line::new()
+            .put(b"[netstack] serve: ")
+            .put(why.as_bytes())
+            .put(b"\n")
+            .print();
+        Line::new()
+            .put(b"[netstack] serve: no address over ")
+            .put(service)
+            .put(b" yet: asked again within ")
+            .dec(wait_ns / 1_000_000_000)
+            .put(b" s, or as soon as its link comes up\n")
+            .print();
+        if !rest_until_link_up(me, wait_ns) {
+            print("[netstack] serve: FAIL: the card's driver went away\n");
+            return Err(NIC_NO_CARD);
+        }
+        wait_ns = wait_ns.saturating_mul(2).min(RETAKE_MOST_NS);
+    }
+}
+
+/// Every frame waiting on the card read and let go: none is for an address
+/// not yet held, and one left unread would wake every wait at once.
+fn drain_frames(me: &IfInfo) {
     let mut frame = [0u8; MAX_FRAME];
     let mut tcp = [0u8; MAX_FRAME];
     let mut udp = [0u8; UDP_DGRAM_MAX];
+    while !matches!(recv_any(me, &mut frame, &mut tcp, &mut udp), Rx::Drained) {}
+}
+
+/// `ns` rested between two tries at a lease, cut short when the card's link
+/// comes up, that being when a try can first succeed; the frames that come
+/// meanwhile let go ([`drain_frames`]). False when the card has gone.
+fn rest_until_link_up(me: &IfInfo, ns: u64) -> bool {
+    let deadline = now_ns().saturating_add(ns);
     let was_up = nic::link_up();
     while now_ns() < deadline {
-        while !matches!(recv_any(me, &mut frame, &mut tcp, &mut udp), Rx::Drained) {}
+        drain_frames(me);
         // Up from down, or up at last when it was not yet told.
         if nic::take_link_back() || (!was_up && nic::link_up()) {
             return true;
@@ -7315,8 +7343,10 @@ fn rest_until_link_up(me: &IfInfo, ns: u64) -> bool {
 }
 
 /// The card `service` names attached ([`port::attach`]), waiting up to 30 s
-/// -- a driver probes its card and waits for the link before it serves it,
-/// seconds under emulation -- and said so under `who`, or why not, with the
+/// -- a driver probes its card before it serves it, and a bounded run waits
+/// for the link too, seconds under emulation; attached says nothing of the
+/// link, which the driver tells after ([`nic::link_known`]) -- and said so
+/// under `who`, or why not, with the
 /// exit code (`netipc::nicport::check`) for it: turned away for want of the
 /// card's key, or no card.
 fn attach_card(service: &[u8], who: &[u8]) -> Result<netipc::nicport::Port, i64> {
@@ -7478,19 +7508,10 @@ pub extern "C" fn _start() -> ! {
         // again for as long as no server answers, as RFC 2131's INIT state
         // does) and the service begun again on it.
         let mut code = run_dns_service(&me, true, dhcp, false);
-        let mut wait_ns = RETAKE_FIRST_NS;
         while code == NIC_LEASE && nic::over_card() && !nic::card_gone() {
-            code = match retake_lease(&mut me) {
-                Ok(client) => {
-                    wait_ns = RETAKE_FIRST_NS;
-                    run_dns_service(&me, true, Some(client), false)
-                }
-                Err(failed) => {
-                    // No server answered: asked again later, and later yet.
-                    sleep_ns(wait_ns);
-                    wait_ns = wait_ns.saturating_mul(2).min(RETAKE_MOST_NS);
-                    failed
-                }
+            code = match retake_lease(&mut me, card) {
+                Ok(client) => run_dns_service(&me, true, Some(client), false),
+                Err(gone) => gone,
             };
         }
         print("[netstack] persistent service returned\n");

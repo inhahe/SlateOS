@@ -1784,15 +1784,33 @@ def _shell_assignment(name):
     return found.group(0)
 
 
+#: The card boot's settings, in boot-test.sh's order: each later one may be
+#: made of the earlier ones.
+_CARD_BOOT_SETTINGS = ("CARD_BOOT_DRIVER", "CARD_BOOT_BDF", "CARD_BOOT_SUBNET",
+                       "CARD_BOOT_SERVICE", "CARD_BOOT_WORDS", "CARD_BOOT_CLOSING",
+                       "CARD_BOOT_DONE", "CARD_BOOT_SERVED", "CARD_BOOT_LEASED",
+                       "CARD_BOOT_WAITING", "CARD_BOOT_NO_DAEMON", "CARD_BOOT_UPSTREAM",
+                       "KERNEL_DEATH_RE", "LIVENESS_FAILURE_RE")
+
+
+def _card_boot_settings():
+    """The card boot's settings as boot-test.sh writes them, for a harness."""
+    return "\n".join(_shell_assignment(n) for n in _CARD_BOOT_SETTINGS) + "\n"
+
+
 def _card_boot_value(name):
-    """The quoted value boot-test.sh gives `name`, unquoted."""
-    return _shell_assignment(name).split("=", 1)[1][1:-1]
-
-
-#: What card_boot_verdict reads besides its arguments.
-_CARD_BOOT_SETTINGS = ("CARD_BOOT_CLOSING", "CARD_BOOT_DONE", "CARD_BOOT_NO_DAEMON",
-                       "CARD_BOOT_UPSTREAM", "CARD_BOOT_WAITING", "KERNEL_DEATH_RE",
-                       "LIVENESS_FAILURE_RE")
+    """The value boot-test.sh's settings give `name`, as bash makes it."""
+    tmp = new_fixture()
+    try:
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write("set -euo pipefail\n" + _card_boot_settings()
+                         + f'printf "%s" "${name}"\n')
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, f"the value of {name}")
+        assert proc is not None and proc.returncode == 0, f"{name}: {proc and proc.stdout}"
+        return proc.stdout
+    finally:
+        drop_fixture(tmp)
 
 
 def _card_boot_verdict(serial_text, main_text=None, pulled=""):
@@ -1814,7 +1832,7 @@ def _card_boot_verdict(serial_text, main_text=None, pulled=""):
                   encoding="utf-8", newline="\n") as handle:
             handle.write(
                 "set -euo pipefail\n"
-                + "\n".join(_shell_assignment(n) for n in _CARD_BOOT_SETTINGS) + "\n"
+                + _card_boot_settings()
                 + extract_shell_function("card_boot_verdict") + "\n\n"
                 + "card_boot_verdict serial.txt "
                 + ("main.txt" if main_text is not None else "''")
@@ -1903,6 +1921,12 @@ def test_the_card_boot_passes_only_a_daemon_that_served_the_card_on_its_own_netw
         ("the daemon not starting fails",
          "[boot] up\n" + _SERVED + no_daemon + "BOOT_OK\n", None,
          ("a check failed", no_daemon.strip())),
+        ("the daemon panicking fails, though its checks finished",
+         "[boot] up\n" + _SERVED + _LEASED + _TOLD + "!!! PANIC in netstack !!!\n" + _DONE,
+         None, ("a check failed", "!!! PANIC in netstack !!!")),
+        ("a driver process's Rust half panicking fails",
+         "[boot] up\n" + _SERVED + _LEASED + "[lx] the layer's Rust half panicked\n" + _TOLD
+         + _DONE, None, ("a check failed", "[lx] the layer's Rust half panicked")),
         ("the daemon serving the kernel's NIC instead fails, saying so",
          "[boot] up\n" + _LEASED.replace("nic.e1000e", "the kernel's NIC") + other_nic, None,
          ("the daemon served another card", other_nic.strip())),
@@ -1924,28 +1948,122 @@ def test_the_card_boot_passes_only_a_daemon_that_served_the_card_on_its_own_netw
                    "serves (10.0.5.")),
     ]:
         check(label, _card_boot_verdict(text, main), want)
-    # Booted with the card's cable out: the daemon must have said it waited
-    # for the card's network, and before it served over it.
+    # Booted with the card's cable out: the daemon must have said twice that
+    # it waited for the card's network, before it served over it -- once
+    # even a card with its cable in waits, its driver serving before the
+    # link is up.
     waited = ("[netstack] serve: no address over nic.e1000e yet: asked again "
               "within 4 s, or as soon as its link comes up\n")
+    never = "the daemon never waited for the card's network"
+    said = ("the cable was out at the start, and {} line(s) before its lease said: "
+            "[netstack] serve: no address over nic.e1000e yet")
     for label, text, want in [
-        ("cable out: the wait said before the lease passes",
-         "[boot] up\n" + _SERVED + waited + _LEASED + _RESOLVED + _TOLD + _DONE, ("", "")),
-        ("cable out: no wait said fails", good,
-         ("the daemon never waited for the card's network",
-          "the cable was out at the start, and no line said: "
-          "[netstack] serve: no address over nic.e1000e yet")),
-        ("cable out: the wait said only after the lease fails",
-         "[boot] up\n" + _SERVED + _LEASED + waited + _RESOLVED + _TOLD + _DONE,
-         ("the daemon waited only after it served", waited.strip())),
+        ("cable out: the wait said twice before the lease passes",
+         "[boot] up\n" + _SERVED + waited + waited + _LEASED + _RESOLVED + _TOLD + _DONE,
+         ("", "")),
+        ("cable out: the wait said once, as a cable in would, fails",
+         "[boot] up\n" + _SERVED + waited + _LEASED + _RESOLVED + _TOLD + _DONE,
+         (never, said.format(1))),
+        ("cable out: no wait said fails", good, (never, said.format(0))),
+        ("cable out: the waits said only after the lease fail",
+         "[boot] up\n" + _SERVED + _LEASED + waited + waited + _RESOLVED + _TOLD + _DONE,
+         (never, said.format(0))),
         ("cable out: a failure still fails first",
-         "[boot] up\n" + _SERVED + waited + _LEASED + failed + _TOLD + _DONE,
+         "[boot] up\n" + _SERVED + waited + waited + _LEASED + failed + _TOLD + _DONE,
          ("a check failed", failed.strip())),
     ]:
         check(label, _card_boot_verdict(text, None, "pulled"), want)
     check("cable in: a wait said is no failure",
           _card_boot_verdict("[boot] up\n" + _SERVED + waited + _LEASED + _TOLD + _DONE),
           ("", ""))
+
+
+def _card_cable(body):
+    """Run the real `card_boot_cable_step`, with the card boot's settings,
+    `$CABLE_PY` bash and `screen.py` a fake that appends its arguments to
+    calls.txt and exits with the number in rc.txt (0 without one), then
+    `body`: its stdout, `None` on a hang."""
+    tmp = new_fixture()
+    try:
+        with open(os.path.join(tmp, "screen.py"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write('echo "$*" >> calls.txt\n'
+                         'echo "QEMU said no"\n'
+                         'exit "$(cat rc.txt 2>/dev/null || echo 0)"\n')
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -euo pipefail\n"
+                + _card_boot_settings()
+                + "CARD_SERIAL=serial.txt\nSCRIPT_DIR=.\nMONITOR_PORT=1\nCABLE_PY=bash\n"
+                "CARD_BOOT_CABLE=0\nCARD_BOOT_PULLED=\nCARD_BOOT_PULL_UNTIL=$(( $(date +%s) + 600 ))\n"
+                + extract_shell_function("card_boot_cable_step") + "\n\n"
+                "step() { card_boot_cable_step 2>>errors.txt; "
+                "echo \"cable=$CARD_BOOT_CABLE pulled=$CARD_BOOT_PULLED\"; }\n"
+                + body)
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the card boot's cable")
+        return None if proc is None else proc.stdout
+    finally:
+        drop_fixture(tmp)
+
+
+def test_the_card_boots_cable_is_pulled_first_and_plugged_in_when_the_daemon_waits():
+    """`card_boot_cable_step` pulls the spare card's cable as soon as the
+    monitor answers, retrying a set_link that failed; plugs it back in only
+    once the daemon has said twice that it waits for the card's network --
+    once, a card with its cable in says too -- retrying that too,
+    and saying each failure with what QEMU answered; and gives the pull up --
+    the cable left in, said, and the wait not counted as checked -- once the
+    kernel has started the driver, or once its time is up.
+    """
+    waiting = _card_boot_value("CARD_BOOT_WAITING") + ": asked again within 4 s\n"
+    served = _card_boot_value("CARD_BOOT_SERVED") + " (pid 10)\n"
+    out = _card_cable(
+        "echo 2 > rc.txt\n"
+        "step\n"                      # the pull refused: tried again
+        "echo 0 > rc.txt\n"
+        "step\n"                      # pulled
+        "printf '[boot] up\\n' > serial.txt\n"
+        "step\n"                      # the daemon not yet waiting: nothing
+        + f"printf '%s' {_sq(waiting)} >> serial.txt\n"
+        + "step\n"                    # waiting once, as a cable in would: nothing
+        + f"printf '%s' {_sq(waiting)} >> serial.txt\n"
+        + "echo 2 > rc.txt\n"
+        "step\n"                      # waiting twice, the plug refused: tried again
+        "echo 0 > rc.txt\n"
+        "step\n"                      # plugged
+        "step\n"                      # in: nothing more
+        "echo calls:; cat calls.txt\n"
+        "echo failures: $(grep -c 'trying again' errors.txt)\n"
+        "echo answered: $(grep -c 'QEMU said no' errors.txt)\n")
+    check("the cable step ran to its end", out is not None, True)
+    if out is not None:
+        lines = out.splitlines()
+        check("its states: refused, pulled, waiting for the daemon's second wait, "
+              "refused, plugged in",
+              [line for line in lines if line.startswith("cable=")],
+              ["cable=0 pulled=", "cable=1 pulled=pulled", "cable=1 pulled=pulled",
+               "cable=1 pulled=pulled", "cable=1 pulled=pulled", "cable=2 pulled=pulled",
+               "cable=2 pulled=pulled"])
+        calls = lines[lines.index("calls:") + 1:] if "calls:" in lines else []
+        check("set_link off twice (once refused), on twice (once refused), nothing else",
+              [line for line in calls if line.startswith("hmp ")],
+              ["hmp --hmp 1 set_link net3 off", "hmp --hmp 1 set_link net3 off",
+               "hmp --hmp 1 set_link net3 on", "hmp --hmp 1 set_link net3 on"])
+        check("the refused plug said so, with QEMU's answer",
+              ("failures: 1" in out, "answered: 1" in out), (True, True))
+    late = _card_cable(f"printf '%s' {_sq(served)} > serial.txt\nstep\n"
+                       "test -f calls.txt && echo called || echo not-called\n")
+    check("a pull not made before the driver started is given up, said, uncounted",
+          late and ([l for l in late.splitlines() if l.startswith("cable=")],
+                    "not pulled before the driver started" in late,
+                    "not-called" in late),
+          (["cable=2 pulled="], True, True))
+    timed_out = _card_cable("echo 2 > rc.txt\nCARD_BOOT_PULL_UNTIL=0\nstep\n")
+    check("a pull refused past its time is given up, said with QEMU's answer",
+          timed_out and ([l for l in timed_out.splitlines() if l.startswith("cable=")],
+                         "could not be pulled (rc 2: QEMU said no)" in timed_out),
+          (["cable=2 pulled="], True))
 
 
 def _limine_conf(cmdline, template):
@@ -1979,26 +2097,22 @@ def _limine_conf(cmdline, template):
 
 def test_the_card_boots_words_lead_the_command_line_of_the_first_entry_alone():
     """The card boot's command line leads with its own words, which the
-    kernel takes over any later value of the same option (kernparam::get
-    returns an option's first): a SLATE_CMDLINE saying net.userspace=0, or
+    kernel takes over any later value of the same option -- kernparam::get
+    returns an option's first, which the kernel's own kernparam self-test
+    checks on every boot: a SLATE_CMDLINE saying net.userspace=0, or
     naming another net.nic, cannot turn the card boot off or point it
     elsewhere, and its deadline is its own. write_limine_conf puts a command
     line after the first entry's kernel_path: alone, the modules after it,
     and refuses an entry with a cmdline: of its own (3) or no kernel_path:
     (2): one writer for both boots.
     """
-    with open(os.path.join(REPO_ROOT, "kernel", "src", "fs", "kernparam.rs"),
-              encoding="utf-8") as handle:
-        kernparam = handle.read()
-    check("the kernel takes an option's first value",
-          ".find(|p| p.key == key)" in kernparam, True)
     tmp = new_fixture()
     try:
         with open(os.path.join(tmp, "harness.sh"), "w",
                   encoding="utf-8", newline="\n") as handle:
             handle.write(
                 "set -euo pipefail\n"
-                + _shell_assignment("CARD_BOOT_WORDS") + "\n"
+                + _card_boot_settings()
                 + "KERNEL_CMDLINE='sched.boot_deadline_ms=2400000 net.userspace=0 net.nic=nic.other'\n"
                 + extract_shell_function("card_boot_cmdline") + "\n\n"
                 + "card_boot_cmdline 600\n")
@@ -2055,27 +2169,31 @@ def test_every_line_the_card_boot_reads_is_printed_by_the_tree():
     main_rs = source("kernel", "src", "main.rs")
     daemon = source("services", "netstack", "src", "main.rs")
     words = _card_boot_value("CARD_BOOT_WORDS").split()
-    done = _card_boot_value("CARD_BOOT_DONE")
+    driver = _card_boot_value("CARD_BOOT_DRIVER")
+    card = _card_boot_value("CARD_BOOT_SERVICE")
     closing = _card_boot_value("CARD_BOOT_CLOSING")
-    card = done[len(closing):]
     check("the closing line over the card is the general one, the card named",
-          done.startswith(closing) and card == "nic.e1000e", True)
+          _card_boot_value("CARD_BOOT_DONE"), closing + card)
     check("the kernel prints the closing line, the card filled in",
           closing + "{}" in spawn, True)
     check("the kernel says when the daemon could not start",
           _card_boot_value("CARD_BOOT_NO_DAEMON") in main_rs, True)
     check("the words have the daemon serve the card the lines name",
-          f"net.nic={card}" in words, True)
+          (f"net.nic={card}" in words, card == "nic." + driver), (True, True))
     serve = [w.split("=", 1)[1] for w in words if w.startswith("linuxdrv.serve=")]
-    check("the words have the driver serve that card at 00:05.0",
-          serve, ["e1000e@00:05.0"])
+    check("the words have the driver serve that card at its slot",
+          serve, [f"{driver}@{_card_boot_value('CARD_BOOT_BDF')}"])
     check("the words skip the self-tests the main boot ran", "selftest.skip=1" in words, True)
-    check("the driver says it serves the card",
-          ('"[linuxdrv] {driver} started serving the card at ' in linuxdrv,
-           "as {name} (pid {})" in linuxdrv), (True, True))
+    served = _card_boot_value("CARD_BOOT_SERVED")
+    check("the driver says it serves the card, as the kernel words it",
+          (served.startswith(f"[linuxdrv] {driver} started serving the card at "),
+           '"[linuxdrv] {driver} started serving the card at ' in linuxdrv,
+           served.endswith(f" as {card}"), "as {name} (pid {})" in linuxdrv),
+          (True, True, True, True))
     check("the daemon says it serves over the card, and its lease",
-          ('b"[netstack] serving over "' in daemon, 'b", DHCP gave "' in daemon),
-          (True, True))
+          (_card_boot_value("CARD_BOOT_LEASED") == f"[netstack] serving over {card}: ",
+           'b"[netstack] serving over "' in daemon, 'b", DHCP gave "' in daemon),
+          (True, True, True))
     before, _, after = _card_boot_value("CARD_BOOT_WAITING").partition(card)
     check("the daemon says it waits for the card's network, the card's name between",
           (f'b"{before}"' in daemon, f'b"{after}: asked again within "' in daemon),

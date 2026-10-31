@@ -298,7 +298,9 @@ fn self_test_inner() {
     // Residue-free: install a known, controlled State for the stateful tests so
     // assertions hold regardless of the cmdline this machine actually booted
     // with (and regardless of prior kshell/procfs activity).
-    let fixture = "root=/dev/vda1 console=ttyS0,115200 quiet loglevel=6 mem=512M";
+    // `root` twice: the first value is the one every reader gets -- what lets
+    // the boot test's card boot lead the command line with its own words.
+    let fixture = "root=/dev/vda1 console=ttyS0,115200 quiet loglevel=6 mem=512M root=/dev/vdb1";
     *STATE.lock() = Some(State {
         params: parse_cmdline(fixture),
         cmdline: String::from(fixture),
@@ -307,7 +309,7 @@ fn self_test_inner() {
         ops: 0,
     });
 
-    // 2: Get parameter.
+    // 2: Get parameter -- its first value.
     assert_eq!(get("root").expect("get"), "/dev/vda1");
     crate::serial_println!("  [2/8] get: OK");
 
@@ -337,18 +339,18 @@ fn self_test_inner() {
     assert_eq!(consume("debug", "test_subsys").expect("consume"), "1");
     crate::serial_println!("  [6/8] consume: OK");
 
-    // 7: Unconsumed — the 5 Bootloader params remain unconsumed (debug now is).
+    // 7: Unconsumed — the 6 Bootloader params remain unconsumed (debug now is).
     let uncon = unconsumed();
     assert!(uncon.iter().all(|p| p.consumed_by.is_none()));
     assert!(uncon.iter().any(|p| p.key == "root"));
     crate::serial_println!("  [7/8] unconsumed: OK");
 
-    // 8: Stats — 5 seeded + 1 new (debug) = 6 params; exactly 2 sets.
+    // 8: Stats — 6 seeded + 1 new (debug) = 7 params; exactly 2 sets.
     let (count, lookups, sets, unconsumed_count, ops) = stats();
-    assert_eq!(count, 6);
+    assert_eq!(count, 7);
     assert!(lookups >= 3);
     assert_eq!(sets, 2);
-    assert_eq!(unconsumed_count, 5);
+    assert_eq!(unconsumed_count, 6);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

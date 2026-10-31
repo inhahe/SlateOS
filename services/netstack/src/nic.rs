@@ -146,6 +146,14 @@ pub fn link_up() -> bool {
     !over_card() || port::link() == Some(true)
 }
 
+/// Whether the card's link is known: a driver process's card's once its
+/// driver has told it -- which it does right after the attach message, read
+/// in the waits that follow, not by the attach -- and the kernel's NIC's
+/// always. Before then [`link_up`] says false of a card whose link may be up.
+pub fn link_known() -> bool {
+    !over_card() || port::links_told() > 0
+}
+
 /// Whether a driver process's card's link has come back up since it was
 /// told down, since this last answered ([`port::take_link_back`]): for the
 /// daemon to renew its lease and announce its addresses. Never for the

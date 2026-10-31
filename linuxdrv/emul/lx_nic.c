@@ -19,8 +19,9 @@
  *   Linux's does. Netlink's notifications go to no one: there are no
  *   listeners.
  * - The task (lx-nic), with "serve=<name>": the first device the driver
- *   registered opened and, once its link is up, served to the network
- *   stack as the service "nic.<name>" (design-decisions 1589; the kit's
+ *   registered opened and served to the network stack -- a bounded run's
+ *   once its link is up, one for ever's at once -- as the service
+ *   "nic.<name>" (design-decisions 1589; the kit's
  *   nicport.rs). Every frame it receives is copied into the next slot the
  *   stack posted, from an rx handler, so nothing above the device is asked;
  *   every frame the stack submits is sent by the task. The stack is told

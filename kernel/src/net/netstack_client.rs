@@ -125,7 +125,9 @@ pub fn userspace_enabled() -> bool {
 }
 
 /// Whether the persistent daemon serves sockets over a card a Linux driver
-/// process serves (`net.nic`), set once it has registered: the root
+/// process serves (`net.nic`), set once it has registered -- or once the
+/// boot has gone on without it while it waits for the card's network, which
+/// then has none yet (`run_persistent_netstack`): the root
 /// namespace's native sockets, its DNS and its interface (`SYS_NET_IF_INFO`)
 /// are then the daemon's, as they are while it holds the kernel's NIC
 /// (`net::raw::is_claimed`) -- the kernel's NIC, which it does not claim,
@@ -152,7 +154,8 @@ pub fn card_dns() -> Option<[u8; 4]> {
     (dns != [0; 4]).then_some(dns)
 }
 
-/// The persistent daemon has registered serving a driver process's card.
+/// The persistent daemon serves a driver process's card: it has registered,
+/// or it is alive and waiting for the card's network.
 pub(crate) fn set_serves_a_card() {
     SERVES_A_CARD.store(true, core::sync::atomic::Ordering::Release);
 }

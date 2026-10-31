@@ -240,8 +240,9 @@
 #                                       # check every persistent-daemon check
 #                                       # passed over it; about a minute). Its
 #                                       # log is build/serial-card.txt. A run
-#                                       # that skips it is recorded as an
-#                                       # experiment.
+#                                       # that skips it -- this, --bench,
+#                                       # --hard-lockup-watchdog -- records it
+#                                       # as a check that could not run.
 #   ./scripts/boot-test.sh --bootstrap  # if a git-ignored prerequisite is
 #                                       # missing (one of the six ring-3 service
 #                                       # binaries the kernel embeds, or the
@@ -2053,30 +2054,42 @@ launch_qemu() {
 # QEMU is started again on the same machine (launch_qemu) with the kernel's
 # command line led by the card boot's own words (card_boot_cmdline), which
 # win over any later ones -- the kernel takes an option's first value:
-# `linuxdrv.serve` starts Linux's e1000e serving the spare 82574 for the
-# system's life -- net3, the second e1000e, at 00:05.0 by QEMU_MACHINE's
-# device order -- and `net.nic` has the daemon serve every socket over it, so
-# that every persistent-daemon check runs over the card. Self-tests are
-# skipped (`selftest.skip=1`): the main boot ran them, and without them the
-# daemon's checks come within a minute. net3 is on a network of its own, so a
-# check that reached the kernel's NIC instead cannot pass by accident; and
-# whatever the main boot's daemon reached beyond QEMU's network, the card
-# boot's must reach too (CARD_BOOT_UPSTREAM).
+# `linuxdrv.serve` starts Linux's CARD_BOOT_DRIVER serving the spare 82574
+# for the system's life -- net3, the second e1000e, at CARD_BOOT_BDF by
+# QEMU_MACHINE's device order -- and `net.nic` has the daemon serve every
+# socket over it, so that every persistent-daemon check runs over the card.
+# Self-tests are skipped (`selftest.skip=1`): the main boot ran them, and
+# without them the daemon's checks come within a minute. net3 is on a network
+# of its own (CARD_BOOT_SUBNET), so a check that reached the kernel's NIC
+# instead cannot pass by accident; and whatever the main boot's daemon
+# reached beyond QEMU's network, the card boot's must reach too
+# (CARD_BOOT_UPSTREAM).
 #
 # The card's cable is out when the card boot starts, and is plugged in once
-# the daemon has said it is waiting for the card's network
-# (CARD_BOOT_WAITING): the wait a machine booted with its cable out, or its
+# the daemon has said twice that it is waiting for the card's network
+# (CARD_BOOT_WAITING) -- once, it says even with the cable in, its driver
+# serving before the link is up: the wait a machine booted with its cable out, or its
 # WiFi not yet joined, makes, which must end in a network rather than in a
-# driver or a daemon that gave up. Through the monitor, as cable_responder
-# pulls it; without one (--no-monitor, or no Python to drive it) the cable
-# stays in and the wait goes unchecked, which is said.
-CARD_BOOT_WORDS="net.userspace=1 selftest.skip=1 linuxdrv.serve=e1000e@00:05.0 net.nic=nic.e1000e"
+# driver or a daemon that gave up (card_boot_cable_step). Without a monitor
+# to pull it through (--no-monitor, or no Python to drive it), or when the
+# pull does not take before the driver is started, the cable stays in and
+# the wait goes unchecked, which is said.
+#
+# The card under test, and every line about it, from these three.
+CARD_BOOT_DRIVER="e1000e"
+CARD_BOOT_BDF="00:05.0"
+CARD_BOOT_SUBNET="10.0.5"
+CARD_BOOT_SERVICE="nic.$CARD_BOOT_DRIVER"
+CARD_BOOT_WORDS="net.userspace=1 selftest.skip=1 linuxdrv.serve=$CARD_BOOT_DRIVER@$CARD_BOOT_BDF net.nic=$CARD_BOOT_SERVICE"
 # The daemon's closing line, whichever NIC it served, and that line over the
 # card, which ends the card boot.
 CARD_BOOT_CLOSING="parity checks done; the daemon serves "
-CARD_BOOT_DONE="parity checks done; the daemon serves nic.e1000e"
-# The daemon's line saying it waits for the card's network.
-CARD_BOOT_WAITING="[netstack] serve: no address over nic.e1000e yet"
+CARD_BOOT_DONE="$CARD_BOOT_CLOSING$CARD_BOOT_SERVICE"
+# The kernel's line saying the driver serves the card, the daemon's saying it
+# serves over it, and the daemon's saying it waits for the card's network.
+CARD_BOOT_SERVED="[linuxdrv] $CARD_BOOT_DRIVER started serving the card at $CARD_BOOT_BDF as $CARD_BOOT_SERVICE"
+CARD_BOOT_LEASED="[netstack] serving over $CARD_BOOT_SERVICE: "
+CARD_BOOT_WAITING="[netstack] serve: no address over $CARD_BOOT_SERVICE yet"
 # What the kernel prints when the persistent daemon could not be started.
 CARD_BOOT_NO_DAEMON="persistent userspace netstack (ring 3) startup failed"
 # Lines the persistent daemon prints only when it reached past QEMU's
@@ -2086,14 +2099,19 @@ CARD_BOOT_UPSTREAM=(
     "[spawn]   persistent netstack TCP: HTTP response received over the daemon"
     "[spawn]   native resolver parity: SYS_DNS_RESOLVE resolves example.com"
 )
+# How long the card boot tries to pull the cable before it gives the pull up.
+CARD_BOOT_PULL_SECS=10
 # 1 while the ESP carries the card boot's command line (card_boot_restore).
 CARD_BOOT_ACTIVE=0
-# Set by card_boot when it failed, for record_boot_outcome to keep and read
-# the card boot's own evidence.
+# Set by card_boot once its QEMU has run and the card boot failed, for
+# record_boot_outcome to keep and read the card boot's own evidence.
 CARD_BOOT_FAILED=0
-# Why the card boot did not run, when it did not: for record_boot_outcome to
-# record a boot that checked less as an experiment.
-CARD_BOOT_NOT_RUN=""
+# The cable's state, card_boot_cable_step's: 0 to pull, 1 out until the
+# daemon says it waits, 2 in. CARD_BOOT_PULLED is "pulled" once it was out
+# before the driver started; CARD_BOOT_PULL_UNTIL is when to give the pull up.
+CARD_BOOT_CABLE=2
+CARD_BOOT_PULLED=""
+CARD_BOOT_PULL_UNTIL=0
 
 # The card boot's kernel command line: its deadline -- the liveness
 # watchdog's, timed to land before the harness gives up on it -- and its
@@ -2117,6 +2135,51 @@ card_boot_restore() {
     CARD_BOOT_ACTIVE=0
 }
 
+# One step of the card boot's cable (CARD_BOOT_CABLE), each turn of its wait:
+# pulled through the monitor as soon as QEMU answers -- given up, and said
+# so, after CARD_BOOT_PULL_SECS, or once the kernel has started the driver,
+# whose first look at the card a pull must come before -- and plugged back in
+# once the daemon says it waits for the card's network. A set_link that fails
+# is said, with what QEMU answered, and tried again the next step.
+card_boot_cable_step() {
+    local said rc=0
+    case "$CARD_BOOT_CABLE" in
+        0)
+            if [ -f "$CARD_SERIAL" ] && grep -a -q -F -- "$CARD_BOOT_SERVED" "$CARD_SERIAL"; then
+                CARD_BOOT_CABLE=2
+                echo "=== Card boot: the cable was not pulled before the driver started: the wait for the card's network is not checked ==="
+                return 0
+            fi
+            said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link net3 off" 2>&1)" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+                CARD_BOOT_CABLE=1
+                CARD_BOOT_PULLED="pulled"
+                echo "=== Card boot: the spare card's cable pulled ==="
+            elif [ "$(date +%s)" -ge "$CARD_BOOT_PULL_UNTIL" ]; then
+                CARD_BOOT_CABLE=2
+                echo "=== Card boot: the cable could not be pulled (rc $rc${said:+: $said}): the wait for the card's network is not checked ==="
+            fi
+            ;;
+        1)
+            # The second wait, not the first: a driver serving for life
+            # serves before its card's link is up, so the daemon says it
+            # waits once even with the cable in; a second, after its first
+            # retry's seconds, is the pull holding.
+            local waits=0
+            [ -f "$CARD_SERIAL" ] && waits="$(grep -a -c -F -- "$CARD_BOOT_WAITING" "$CARD_SERIAL")" || true
+            [ "${waits:-0}" -ge 2 ] || return 0
+            said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link net3 on" 2>&1)" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+                CARD_BOOT_CABLE=2
+                echo "=== Card boot: the daemon waits for the card's network; its cable plugged in ==="
+            else
+                echo "=== Card boot: set_link net3 on failed (rc $rc${said:+: $said}); trying again ===" >&2
+            fi
+            ;;
+    esac
+    return 0
+}
+
 # What is wrong with the card boot whose serial log is $1, the main boot's
 # being $2: nothing when it passed; else a first line naming what kind of
 # failure it was, the same words every time it fails that way (it becomes
@@ -2125,12 +2188,13 @@ card_boot_restore() {
 # Read up to the daemon's closing line over the card (CARD_BOOT_DONE), or the
 # whole log when it never came. A failure is what the main boot's own checks
 # call one (check_selftest_failures, check_liveness_failures,
-# kernel_is_dead's KERNEL_DEATH_RE) and a check's FAIL line. A check that
-# skipped for want of an upstream passes, as it does in the main boot --
-# unless the main boot's daemon reached that upstream (CARD_BOOT_UPSTREAM).
-# The card must be served on net3's own network, and SYS_NET_IF_INFO must say
-# so. With $3 "pulled", the card's cable was out at the start: the daemon
-# must have said it waited for the card's network, before it served over it.
+# kernel_is_dead's KERNEL_DEATH_RE), a check's FAIL line, and a panic of any
+# process -- the daemon's or a driver's. A check that skipped for want of an
+# upstream passes, as it does in the main boot -- unless the main boot's
+# daemon reached that upstream (CARD_BOOT_UPSTREAM). The card must be served
+# on net3's own network, and SYS_NET_IF_INFO must say so. With $3 "pulled",
+# the card's cable was out at the start: the daemon must have said twice
+# that it waited for the card's network, before it served over it.
 card_boot_verdict() {
     local log="$1" main="${2:-}" pulled="${3:-}" upto part bad want served proof waited
     if [ ! -f "$log" ]; then
@@ -2154,7 +2218,7 @@ card_boot_verdict() {
     fi
     bad="$( { grep -a -i -F -- "self-test failed" <<< "$part" || true
               grep -a -E -- "$LIVENESS_FAILURE_RE" <<< "$part" || true
-              grep -a -F -e "  FAIL" -e "$CARD_BOOT_NO_DAEMON" <<< "$part" || true; } )"
+              grep -a -F -e "  FAIL" -e "$CARD_BOOT_NO_DAEMON" -e "PANIC" -e "panicked" <<< "$part" || true; } )"
     if [ -n "$bad" ]; then
         echo "a check failed"
         echo "${bad%%$'\n'*}" | cut -c1-200
@@ -2171,34 +2235,31 @@ card_boot_verdict() {
         fi
         return 0
     fi
-    for want in \
-        "[linuxdrv] e1000e started serving the card at 00:05.0 as nic.e1000e" \
-        "[netstack] serving over nic.e1000e: " \
-        "interface parity: SYS_NET_IF_INFO says the interface the daemon serves (10.0.5."; do
+    for want in "$CARD_BOOT_SERVED" "$CARD_BOOT_LEASED" \
+        "interface parity: SYS_NET_IF_INFO says the interface the daemon serves ($CARD_BOOT_SUBNET."; do
         if ! grep -a -q -F -- "$want" <<< "$part"; then
             echo "a line the card boot needs is missing"
             echo "$want"
             return 0
         fi
     done
-    served="$(grep -a -F -- "[netstack] serving over nic.e1000e: " <<< "$part")" || true
-    if ! grep -a -q -F -- "DHCP gave 10.0.5." <<< "$served"; then
+    served="$(grep -a -F -- "$CARD_BOOT_LEASED" <<< "$part")" || true
+    if ! grep -a -q -F -- "DHCP gave $CARD_BOOT_SUBNET." <<< "$served"; then
         echo "the card was not on its own network"
         echo "${served%%$'\n'*}" | cut -c1-200
         return 0
     fi
     if [ "$pulled" = "pulled" ]; then
-        # The first of each, by line number: the wait must come first.
-        waited="$(grep -a -n -F -- "$CARD_BOOT_WAITING" <<< "$part")" || true
-        served="$(grep -a -n -F -- "[netstack] serving over nic.e1000e: " <<< "$part")" || true
-        if [ -z "$waited" ]; then
+        # Twice before the lease: once even a card with its cable in waits,
+        # its driver serving before the link is up; twice, across a retry's
+        # seconds, is the pull holding (card_boot_cable_step plugs it in on
+        # the second).
+        served="$(grep -a -n -F -- "$CARD_BOOT_LEASED" <<< "$part")" || true
+        served="${served%%$'\n'*}"
+        waited="$(head -n "${served%%:*}" <<< "$part" | grep -a -c -F -- "$CARD_BOOT_WAITING")" || true
+        if [ "${waited:-0}" -lt 2 ]; then
             echo "the daemon never waited for the card's network"
-            echo "the cable was out at the start, and no line said: $CARD_BOOT_WAITING"
-            return 0
-        fi
-        if [ "${waited%%:*}" -gt "${served%%:*}" ]; then
-            echo "the daemon waited only after it served"
-            echo "${waited#*:}" | cut -c1-200
+            echo "the cable was out at the start, and ${waited:-0} line(s) before its lease said: $CARD_BOOT_WAITING"
             return 0
         fi
     fi
@@ -2214,31 +2275,45 @@ card_boot_verdict() {
     return 0
 }
 
+# Why the card boot does not run on this run, or nothing when it does:
+# CARD_BOOT=0; --bench, a run about the numbers; --hard-lockup-watchdog, a
+# wedge hunt about the main boot alone, whose loops (wedge-soak.sh,
+# hang-repro-loop.sh, ...) read its log alone; or a boot medium carrying no
+# linuxdrv/$CARD_BOOT_DRIVER (a host that cannot build the Linux drivers).
+card_boot_not_run() {
+    if [ "${CARD_BOOT:-1}" != "1" ]; then
+        echo "CARD_BOOT=${CARD_BOOT}"
+    elif [ "$BENCH" -eq 1 ]; then
+        echo "--bench"
+    elif [ "$HARD_LOCKUP_WATCHDOG" -eq 1 ]; then
+        echo "--hard-lockup-watchdog (a wedge hunt, about the main boot)"
+    else
+        case " $LINUXDRV_STAGED " in
+            *" $CARD_BOOT_DRIVER "*) ;;
+            *) echo "no linuxdrv/$CARD_BOOT_DRIVER on the boot medium" ;;
+        esac
+    fi
+}
+
 # Run the card boot (above) and judge it, setting FAILED_CHECK and returning
 # non-zero when it did not pass. Called by finish_pass once the main boot has
-# passed. Not run, and said not to be, with CARD_BOOT=0 or when the boot
-# medium carries no linuxdrv/e1000e (a host that cannot build the Linux
-# drivers); record_boot_outcome then records the run as one that checked
-# less.
+# passed. Not run where card_boot_not_run says why, which is said and
+# recorded as a check that could not run (run_checker_note_skip).
 card_boot() {
-    if [ "${CARD_BOOT:-1}" != "1" ]; then
-        CARD_BOOT_NOT_RUN="CARD_BOOT=${CARD_BOOT} (the card boot not run)"
-        echo "=== Card boot: skipped (CARD_BOOT=${CARD_BOOT}) ==="
+    local why
+    why="$(card_boot_not_run)"
+    if [ -n "$why" ]; then
+        echo "=== Card boot: not run ($why) ==="
+        run_checker_note_skip "card boot" "$why"
         return 0
     fi
-    case " $LINUXDRV_STAGED " in
-        *" e1000e "*) ;;
-        *)
-            CARD_BOOT_NOT_RUN="no linuxdrv/e1000e on the boot medium (the card boot not run)"
-            echo "=== Card boot: not run -- the boot medium carries no linuxdrv/e1000e ==="
-            return 0
-            ;;
-    esac
     # Its limit: a quarter of the main boot's, ten minutes at least -- under
     # a minute idle, and as much slower as the run's own --timeout allows.
     local limit=$(( TIMEOUT / 4 > 600 ? TIMEOUT / 4 : 600 ))
     local began rc=0 out kind detail
     kill_qemu "$QEMU_PID"
+    # This run's evidence only: the last run's must not be read as this one's.
+    rm -f "$CARD_SERIAL" "$CARD_QEMU_STDERR"
     CARD_BOOT_ACTIVE=1
     write_limine_conf "$(card_boot_cmdline "$limit")" || rc=$?
     if [ "$rc" -eq 0 ] && [ "$USB_IMAGE" -eq 1 ]; then
@@ -2247,47 +2322,33 @@ card_boot() {
     fi
     if [ "$rc" -ne 0 ]; then
         card_boot_restore || true
-        CARD_BOOT_FAILED=1
         FAILED_CHECK="the card boot: its boot medium could not be written"
         echo "=== Card boot: FAILED -- its boot medium could not be written (exit $rc) ==="
         return 1
     fi
     echo "=== Card boot: the persistent network over the spare 82574 ($(card_boot_cmdline "$limit" | cut -d' ' -f1-5)) ==="
-    # The cable: 0 to pull before the guest's driver can see a link, 1 out
-    # until the daemon says it waits, 2 in. Without a monitor to pull it
-    # through, in from the start.
-    local cable=2 pulled=""
+    CARD_BOOT_PULLED=""
     if [ -n "$CABLE_PY" ] && [ "${#MONITOR_ARGS[@]}" -gt 0 ]; then
-        cable=0
+        CARD_BOOT_CABLE=0
+        CARD_BOOT_PULL_UNTIL=$(( $(date +%s) + CARD_BOOT_PULL_SECS ))
     else
+        CARD_BOOT_CABLE=2
         echo "=== Card boot: the cable stays in (no monitor, or no Python to drive it): the wait for the card's network is not checked ==="
     fi
-    rm -f "$CARD_SERIAL"
     began=$(date +%s)
     launch_qemu "$CARD_SERIAL_WIN" "$CARD_QEMU_STDERR"
     QEMU_PID=$!
     raise_qemu_priority &
     while kill -0 "$QEMU_PID" 2>/dev/null && [ $(( $(date +%s) - began )) -lt "$limit" ]; do
-        if [ "$cable" -eq 0 ]; then
-            # At once, and again until the monitor answers: the firmware and
-            # the kernel take seconds before the driver looks at the card.
-            if "$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link net3 off" > /dev/null 2>&1; then
-                cable=1
-                pulled="pulled"
-                echo "=== Card boot: the spare card's cable pulled ==="
-            else
-                sleep 0.2
-            fi
-            continue
+        # Quickly while the cable is still to pull: the firmware and the
+        # kernel take seconds before the driver looks at the card.
+        if [ "$CARD_BOOT_CABLE" -eq 0 ]; then
+            sleep 0.2
+        else
+            sleep 1
         fi
-        sleep 1
+        card_boot_cable_step
         [ -f "$CARD_SERIAL" ] || continue
-        if [ "$cable" -eq 1 ] && grep -a -q -F -- "$CARD_BOOT_WAITING" "$CARD_SERIAL"; then
-            if "$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link net3 on" > /dev/null 2>&1; then
-                cable=2
-                echo "=== Card boot: the daemon waits for the card's network; its cable plugged in after $(( $(date +%s) - began ))s ==="
-            fi
-        fi
         # The daemon's closing line, whichever NIC it served; its start
         # failing; the boot over without either; or the kernel dead.
         if grep -a -q -F -e "$CARD_BOOT_CLOSING" -e "$CARD_BOOT_NO_DAEMON" "$CARD_SERIAL" \
@@ -2309,7 +2370,7 @@ card_boot() {
     if ! card_boot_restore; then
         echo "=== Card boot: WARNING: the ESP could not be put back as the main boot had it; the next boot test writes it again ===" >&2
     fi
-    out="$(card_boot_verdict "$CARD_SERIAL" "$SERIAL_FILE" "$pulled")"
+    out="$(card_boot_verdict "$CARD_SERIAL" "$SERIAL_FILE" "$CARD_BOOT_PULLED")"
     if [ -n "$out" ]; then
         kind="${out%%$'\n'*}"
         detail="${out#*$'\n'}"
@@ -2320,7 +2381,7 @@ card_boot() {
         tail -n 15 "$CARD_SERIAL" 2>/dev/null | tr -d '\r' | sed 's/^/    /'
         return 1
     fi
-    echo "=== Card boot: PASS after $(( $(date +%s) - began ))s -- Linux's e1000e served the spare 82574 for the system's life${pulled:+, booted with its cable out,} and every persistent-daemon check ran over it ==="
+    echo "=== Card boot: PASS after $(( $(date +%s) - began ))s -- Linux's $CARD_BOOT_DRIVER served the spare 82574 for the system's life${CARD_BOOT_PULLED:+, booted with its cable out,} and every persistent-daemon check ran over it ==="
 }
 
 # Stop QEMU and put the log back as it stood at the marker ($SERIAL_AT_MARKER,
@@ -3917,12 +3978,6 @@ record_boot_outcome() {
         # packed the image.
         why="${why:+$why; }no rootfs.ext4 in this worktree (not attached; /mnt rungs no-op)"
     fi
-    # A run whose card boot did not run checked less in the same way, though
-    # its timings are a tracking run's -- so this reason is the outcome's
-    # alone, not the benchmark recorder's.
-    if [ -n "$CARD_BOOT_NOT_RUN" ]; then
-        why="${why:+$why; }$CARD_BOOT_NOT_RUN"
-    fi
     if [ -n "$why" ]; then
         args+=(--experiment "$why")
     fi
@@ -4155,10 +4210,9 @@ finish_pass() {
     fi
 
     # The persistent network over a driver process's card, on a second boot
-    # of the same machine. A --bench run is about the numbers, which it has.
-    if [ "$BENCH" -eq 1 ]; then
-        echo "=== Card boot: not run (--bench) ==="
-    elif ! card_boot; then
+    # of the same machine -- or, where it does not run, said and recorded as
+    # a check that could not (card_boot_not_run).
+    if ! card_boot; then
         echo "=== Boot test FAILED ($FAILED_CHECK) ==="
         exit 1
     fi
@@ -10736,8 +10790,8 @@ QEMU_START_EPOCH=$(date +%s)
 # (it takes the first it finds): the device the ring-3 probe driver
 # (`services/devprobe`, `devhandle::self_test_ring3`) opens, and the Linux
 # driver layer's e1000e serves -- at 00:05.0, by the order of the devices
-# here, which the card boot names. Its network is one of its own
-# (10.0.5.0/24, where the others are QEMU's 10.0.2.0/24), so that what goes
+# here, which the card boot names (CARD_BOOT_BDF). Its network is one of its
+# own (CARD_BOOT_SUBNET, where the others are QEMU's 10.0.2.0/24), so that what goes
 # over this card -- its address, gateway and DNS server -- cannot be taken
 # for what goes over the kernel's NIC.
 #
@@ -10755,7 +10809,7 @@ QEMU_MACHINE=(
     -device rtl8139,netdev=net1,mac=52:54:00:12:34:57
     -netdev user,id=net2
     -device virtio-net-pci,netdev=net2,mac=52:54:00:12:34:58
-    -netdev user,id=net3,net=10.0.5.0/24
+    -netdev "user,id=net3,net=$CARD_BOOT_SUBNET.0/24"
     -device e1000e,netdev=net3,mac=52:54:00:12:34:59
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN"
     "${ESP_DRIVE_ARGS[@]}"

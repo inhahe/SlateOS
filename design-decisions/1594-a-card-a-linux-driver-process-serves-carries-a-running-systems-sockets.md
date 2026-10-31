@@ -72,12 +72,16 @@ are off by default.
 5. **Served for life, both wait for the card's network rather than give
    up on it.** The driver serves the card at once, link or none -- the port
    tells the stack its carrier at every turn; the daemon waits for its first
-   lease as it does for a lost one, tried again later and later yet
-   (4 s doubling to 64 s) and at once when the link comes up; the kernel
-   treats the card as the network from the daemon's start, and after 60 s
-   without it goes on without the persistent-daemon checks, saying why. A
-   cable plugged in after boot, or a WiFi network joined, is a link coming
-   up like any other.
+   lease as it does for a lost one (`lease_for_life`), not asking while the
+   card has no link, tried again later and later yet (4 s doubling to
+   64 s) and at once when the link comes up; the kernel waits 60 s for it,
+   saying so every 10 s, then goes on without the persistent-daemon
+   checks, saying why -- the card the root namespace's network from then
+   on (or from the daemon's registration, if sooner), `SYS_NET_IF_INFO`
+   saying an interface that is down with no address meanwhile; a daemon
+   that ended first leaves the network the kernel's NIC's. A cable plugged
+   in after boot, or a WiFi network joined, is a link coming up like any
+   other.
 
 ### What it does not do yet
 

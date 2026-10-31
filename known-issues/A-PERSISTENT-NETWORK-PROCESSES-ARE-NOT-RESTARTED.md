@@ -26,10 +26,10 @@ card with no link or a network with no DHCP answer: the driver serving for
 the system's life serves the card at once, its link told to the stack as it
 comes (`lx_nic_serve`), and the daemon waits for its first lease as it does
 for a lost one -- tried again later and later yet, and at once when the link
-comes up (`serve_card`, `rest_until_link_up`); the kernel goes on after 60 s
-without the persistent-daemon checks, the card still the network
-(`set_serves_a_card` at the daemon's start). Every boot test's card boot
-starts with the card's cable out.
+comes up (`lease_for_life`); the kernel goes on after 60 s without the
+persistent-daemon checks, the card the network from then on with the daemon
+alive (`set_serves_a_card`). Every boot test's card boot starts with the
+card's cable out.
 
 **Who sees it.** No one yet: both options are off by default. The first is
 the test PC once its WiFi carries its network -- a driver that faults, or a

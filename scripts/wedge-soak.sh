@@ -108,11 +108,7 @@ while [ "$done_iters" -lt "$MAX_ITERS" ]; do
     # recording itself, from its EXIT trap -- nothing further is needed here,
     # and in particular the soak must NOT record on boot-test's behalf: that
     # would double-count every iteration.
-    #
-    # CARD_BOOT=0: the soak hunts the main boot's wedges and reads only its
-    # log; a card boot after it would fail a run with rc 1 that this loop
-    # then reads as a slow main boot.
-    BOOT_LABEL="soak-$RUNSTAMP-iter$n" CARD_BOOT=0 \
+    BOOT_LABEL="soak-$RUNSTAMP-iter$n" \
     bash scripts/boot-test.sh --hard-lockup-watchdog --no-stage \
         --timeout="$TIMEOUT" --stall-secs="$STALL_SECS" \
         > "$stdout_log" 2>&1

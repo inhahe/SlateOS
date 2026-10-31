@@ -20738,8 +20738,9 @@ pub fn sys_tcp_listener_list(args: &SyscallArgs) -> SyscallResult {
 /// (`net.nic`) and the caller is in the root namespace, that card, as the
 /// daemon says it -- whose addresses the kernel does not hold.
 ///
-/// Returns 0 on success with interface info written; the daemon's error
-/// when it serves the card and cannot say it.
+/// Returns 0 on success with interface info written -- while the daemon
+/// still waits for the card's network, an interface that is down with no
+/// address; the daemon's error when it serves the card and cannot say it.
 pub fn sys_net_if_info(args: &SyscallArgs) -> SyscallResult {
     let buf_len = args.arg1 as usize;
 
@@ -20756,9 +20757,15 @@ pub fn sys_net_if_info(args: &SyscallArgs) -> SyscallResult {
     let (ip, mask, gateway, dns, mac, up) = if crate::net::netstack_client::serves_a_card()
         && crate::sched::current_task_net_ns() == crate::netns::ROOT_NS
     {
-        match crate::net::netstack_client::daemon_interface() {
-            Ok(i) => (i.ip4, i.mask, i.gateway, i.dns, i.mac, i.up),
-            Err(e) => return SyscallResult::err(e),
+        if !crate::ipc::service::is_registered(b"net.stack") {
+            // The daemon is still waiting for the card's network: an
+            // interface that is down, with no address yet.
+            ([0; 4], [0; 4], [0; 4], [0; 4], [0; 6], false)
+        } else {
+            match crate::net::netstack_client::daemon_interface() {
+                Ok(i) => (i.ip4, i.mask, i.gateway, i.dns, i.mac, i.up),
+                Err(e) => return SyscallResult::err(e),
+            }
         }
     } else {
         let i = crate::net::interface::info();

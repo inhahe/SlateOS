@@ -5771,38 +5771,37 @@ pub fn run_persistent_netstack(card: Option<&str>) -> KernelResult<()> {
         }
     };
 
-    // Over a driver's card, the root namespace's native sockets, its resolver
-    // and its interface are the daemon's from now on
-    // (`netstack_client::serves_a_card`) -- the card being the network
-    // whether or not it has one yet: until the daemon registers, they fail
-    // as they would with no network at all.
-    if card.is_some() {
-        crate::net::netstack_client::set_serves_a_card();
-    }
-
     // Wait for the daemon to publish `net.stack`. Over the kernel's NIC it
     // registers early, before the slow ARP work: 3 s. Over a driver process's
     // card, only once it has attached (its own limit 30 s: the driver probing
     // the card) and taken an address there, which it waits for as long as it
     // takes -- the card's link to come up, a DHCP server to answer: the boot
-    // waits 60 s for it, then goes on without the checks below, the daemon
-    // left to register when it can. Slept between looks rather than yielded,
-    // so that on one CPU the boot thread does not share the driver's and the
-    // daemon's time; and a daemon that has ended is said, with how, rather
-    // than waited out.
+    // waits 60 s for it, saying so every 10 s (a wait the liveness watchdog
+    // would otherwise take for a hang), then goes on without the checks
+    // below, the daemon left to register when it can. Slept between looks
+    // rather than yielded, so that on one CPU the boot thread does not share
+    // the driver's and the daemon's time; and a daemon that has ended is
+    // said, with how, rather than waited out.
     let reg_wait_s: u64 = if card.is_some() { 60 } else { 3 };
-    let reg_deadline =
-        crate::hrtimer::now_ns().saturating_add(reg_wait_s.saturating_mul(1_000_000_000));
+    let began = crate::hrtimer::now_ns();
+    let reg_deadline = began.saturating_add(reg_wait_s.saturating_mul(1_000_000_000));
+    let mut said_s = 0u64;
     while !service::is_registered(b"net.stack") {
         if crate::proc::pcb::state(result.pid) == Some(crate::proc::pcb::ProcessState::Zombie) {
+            // The card is not made the root namespace's network: its
+            // sockets and resolver stay the kernel's NIC's.
             serial_println!(
                 "[spawn]   FAIL: the persistent netstack daemon ended (exit {:?}) before it registered net.stack",
                 crate::proc::pcb::exit_code(result.pid)
             );
             return Err(KernelError::InternalError);
         }
-        if crate::hrtimer::now_ns() >= reg_deadline {
+        let now = crate::hrtimer::now_ns();
+        if now >= reg_deadline {
             if let Some(name) = card {
+                // Alive and waiting for the card's network: the card is the
+                // root namespace's network, which has none yet.
+                crate::net::netstack_client::set_serves_a_card();
                 serial_println!(
                     "[spawn]   persistent netstack daemon (pid {}): no network over {} within {}s -- \
                      no link, or no DHCP answer; it serves sockets once it has one, and the checks \
@@ -5819,12 +5818,27 @@ pub fn run_persistent_netstack(card: Option<&str>) -> KernelResult<()> {
             );
             return Err(KernelError::TimedOut);
         }
+        let waited_s = now.saturating_sub(began) / 1_000_000_000;
+        if card.is_some() && waited_s >= said_s.saturating_add(10) {
+            said_s = waited_s;
+            serial_println!(
+                "[spawn]   waiting for the persistent netstack daemon's network: {}s of {}s",
+                waited_s,
+                reg_wait_s
+            );
+        }
         crate::sched::sleep_ms(10);
     }
     serial_println!(
         "[spawn]   persistent netstack daemon registered net.stack (pid {})",
         result.pid
     );
+    // Over a driver's card, the root namespace's native sockets, its resolver
+    // and its interface are the daemon's from now on
+    // (`netstack_client::serves_a_card`).
+    if card.is_some() {
+        crate::net::netstack_client::set_serves_a_card();
+    }
     // The daemon's own interface, once: the DNS server the UDP checks ask --
     // its lease's on the card it serves, the kernel's NIC's only where that
     // is its card.

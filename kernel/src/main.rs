@@ -2047,6 +2047,10 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = workqueue::init() {
         serial_println!("[boot] WARNING: failed to spawn workqueue worker: {:?}", e);
     }
+    // The power button made the OS's -- ACPI mode taken, the SCI routed --
+    // once the I/O APIC, interrupt remapping and the work queue are up
+    // (known-issues A-THE-POWER-BUTTON-NEVER-REACHES-THE-KERNEL).
+    acpi::events::init();
 
     {
         #[inline(never)]
@@ -4102,6 +4106,12 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || fs::vfs::self_test_mount_tree(),
     );
+    // The power button pressed by the boot test's harness (QEMU's
+    // system_powerdown, asked for on the serial line) and taken by the SCI.
+    // RAN-IF: "[acpi] power button: press it"
+    selftest::dispatch_debug("ACPI power button", selftest::Severity::Diagnostic, || {
+        acpi::events::self_test()
+    });
     // A filesystem detached by identity from every table it is in
     // (`Vfs::detach_filesystem`, what the WiFi files' drop uses), on mounts
     // made under /tmp.

@@ -24,6 +24,7 @@
 //! - Based on Linux `drivers/acpi/` and Fuchsia `zircon/kernel/platform/`
 //!   table parsing patterns.
 
+pub mod events;
 pub mod fadt;
 mod madt;
 mod tables;
@@ -613,8 +614,9 @@ pub unsafe fn init(rsdp_addr: u64, hhdm_offset: u64, memory_map: &[&crate::limin
                 }
             }
 
-            // Store for power module.
+            // Store for power module, and for the power button's events.
             crate::power::set_power_info(&power_info);
+            events::note_fadt(&power_info);
         }
         *FADT_TABLE_PHYS.lock() = Some(phys);
     } else {

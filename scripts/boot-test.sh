@@ -2007,6 +2007,38 @@ cable_responder() {
     fi
 }
 
+# The power button, pressed once when the kernel's ACPI self-test asks
+# ("[acpi] power button: press it", kernel/src/acpi/events.rs): QEMU's
+# system_powerdown, the ACPI power button's event, through the same monitor
+# and Python as the cable (acpi.pwrbtn=hmp on the command line says so). A
+# system_powerdown that fails is said and tried again the next second; the
+# self-test, waiting 20 s for the press, fails the boot if it never comes.
+# The log is read from where the last look stopped, less 200 bytes for a
+# line split there. Not anchored: a kernel line can be printed into another.
+PWRBTN_STEP=0
+PWRBTN_SEEN=0
+pwrbtn_responder() {
+    [ -n "$CABLE_PY" ] && [ -f "$SERIAL_FILE" ] || return 0
+    [ "$PWRBTN_STEP" -lt 2 ] || return 0
+    if [ "$PWRBTN_STEP" -eq 0 ]; then
+        local size from
+        size=$(wc -c < "$SERIAL_FILE")
+        from=$(( PWRBTN_SEEN > 200 ? PWRBTN_SEEN - 200 : 0 ))
+        PWRBTN_SEEN=$size
+        grep -a -q -F 'power button: press it' <(tail -c +$(( from + 1 )) "$SERIAL_FILE") \
+            || return 0
+        PWRBTN_STEP=1
+    fi
+    local said rc=0
+    said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "system_powerdown" 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "=== Power button: system_powerdown as the run asked ==="
+        PWRBTN_STEP=2
+    else
+        echo "=== Power button: system_powerdown failed (rc $rc)${said:+: $said}; trying again ===" >&2
+    fi
+}
+
 # Write the ESP's limine.conf from the tree's: the kernel command line $1
 # after the first entry's kernel_path:, and the modules the medium carries
 # (MODULE_LINES, which Step 2 gathers) after it. 0; 2 when the first entry
@@ -9788,8 +9820,10 @@ fi
 #     SLATE_CMDLINE="selftest.keep_going=1" ./scripts/boot-test.sh
 KERNEL_CMDLINE="sched.boot_deadline_ms=$((TIMEOUT * 1000))"
 # With the monitor, and a Python to run screen.py, the harness pulls the
-# spare 82574's cable when the netstack daemon asks (cable_responder): the
-# kernel is told so, and without them the daemon leaves the cable alone.
+# spare 82574's cable when the netstack daemon asks (cable_responder) and
+# presses the power button when the kernel's ACPI self-test asks
+# (pwrbtn_responder): the kernel is told so, and without them the daemon
+# leaves the cable alone and the self-test is skipped.
 if [ "$MONITOR_ENABLED" -eq 1 ]; then
     if command -v python &>/dev/null; then
         CABLE_PY=python
@@ -9797,7 +9831,7 @@ if [ "$MONITOR_ENABLED" -eq 1 ]; then
         CABLE_PY=python3
     fi
     if [ -n "$CABLE_PY" ]; then
-        KERNEL_CMDLINE="$KERNEL_CMDLINE linuxdrv.cable=hmp"
+        KERNEL_CMDLINE="$KERNEL_CMDLINE linuxdrv.cable=hmp acpi.pwrbtn=hmp"
     fi
 fi
 if [ -n "${SLATE_CMDLINE:-}" ]; then
@@ -11119,6 +11153,7 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     sleep 1
     ELAPSED=$(( $(date +%s) - WAIT_START_EPOCH ))
     cable_responder
+    pwrbtn_responder
 
     # Anchor to line start: the success marker is printed as a standalone line
     # (`serial_println!("BOOT_OK")`).  An UNanchored match also trips on the

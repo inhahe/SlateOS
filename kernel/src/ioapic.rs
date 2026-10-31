@@ -948,10 +948,14 @@ pub extern "C" fn handle_device_irq(irq: u32) {
     // 0. Device-specific handlers that must run in ISR context.
     //    The keyboard must read its scan code from port 0x60
     //    immediately — the data is lost after EOI.
+    //    The SCI must have the power button's status cleared before the
+    //    EOI, or its level-triggered line raises it again.
     if irq == 1 {
         crate::keyboard::handle_scancode();
     } else if irq == 12 {
         crate::mouse::handle_irq();
+    } else if crate::acpi::events::sci_pin() == Some(irq) {
+        crate::acpi::events::handle_sci();
     }
 
     // PCI shared IRQ handling: acknowledge all virtio devices that

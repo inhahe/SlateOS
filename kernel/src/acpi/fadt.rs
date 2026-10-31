@@ -174,6 +174,26 @@ pub struct PowerInfo {
     pub dsdt_phys: u64,
     /// SCI interrupt number.
     pub sci_irq: u16,
+    /// PM1a and PM1b event blocks' I/O ports, 0 where absent: each block's
+    /// status register, then its enable register, `pm1_evt_len` bytes in
+    /// all.
+    pub pm1a_evt_blk: u16,
+    pub pm1b_evt_blk: u16,
+    pub pm1_evt_len: u8,
+    /// GPE0 and GPE1 blocks' I/O ports, 0 where absent, and their lengths:
+    /// status bytes, then as many enable bytes.
+    pub gpe0_blk: u16,
+    pub gpe0_blk_len: u8,
+    pub gpe1_blk: u16,
+    pub gpe1_blk_len: u8,
+    /// The SMI command port, and what is written to it to hand ACPI mode to
+    /// the OS; 0 where ACPI mode cannot be asked for (it is the OS's from the
+    /// start).
+    pub smi_command: u16,
+    pub acpi_enable: u8,
+    /// Whether the platform is hardware-reduced ACPI (FADT flag 20): no
+    /// fixed-feature hardware -- no PM1 registers, no fixed power button.
+    pub hw_reduced: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +215,28 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
     let pm1a = unsafe { (*fadt).pm1a_cnt_blk } as u16;
     let pm1b = unsafe { (*fadt).pm1b_cnt_blk } as u16;
     let sci_irq = unsafe { (*fadt).sci_interrupt };
+    // The event blocks' 32-bit port fields: ports are 16 bits, and one past
+    // that range is none the OS could reach.
+    let port = |value: u32| u16::try_from(value).unwrap_or(0);
+    // SAFETY: as above, fields of the validated FADT, read by value.
+    let (pm1a_evt, pm1b_evt, pm1_evt_len) = unsafe {
+        (
+            port((*fadt).pm1a_evt_blk),
+            port((*fadt).pm1b_evt_blk),
+            (*fadt).pm1_evt_len,
+        )
+    };
+    // SAFETY: as above.
+    let (gpe0, gpe0_len, gpe1, gpe1_len) = unsafe {
+        (
+            port((*fadt).gpe0_blk),
+            (*fadt).gpe0_blk_len,
+            port((*fadt).gpe1_blk),
+            (*fadt).gpe1_blk_len,
+        )
+    };
+    // SAFETY: as above.
+    let (smi_command, acpi_enable) = unsafe { (port((*fadt).smi_command), (*fadt).acpi_enable) };
     let dsdt_32 = unsafe { (*fadt).dsdt };
     let flags = unsafe { (*fadt).flags };
     let header = unsafe { (*fadt).header };
@@ -252,6 +294,20 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
         };
 
     serial_println!("[acpi]   DSDT at phys={:#x}", dsdt_phys);
+    let hw_reduced = flags & (1 << 20) != 0;
+    serial_println!(
+        "[acpi]   PM1a_EVT: {:#x}, PM1b_EVT: {:#x} (len {}), GPE0: {:#x} (len {}), GPE1: {:#x} (len {}), SMI_CMD: {:#x}, ACPI_ENABLE: {:#x}{}",
+        pm1a_evt,
+        pm1b_evt,
+        pm1_evt_len,
+        gpe0,
+        gpe0_len,
+        gpe1,
+        gpe1_len,
+        smi_command,
+        acpi_enable,
+        if hw_reduced { ", hardware-reduced" } else { "" }
+    );
 
     PowerInfo {
         pm1a_cnt_blk: pm1a,
@@ -263,6 +319,16 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
         reset_value: reset_val,
         dsdt_phys,
         sci_irq,
+        pm1a_evt_blk: pm1a_evt,
+        pm1b_evt_blk: pm1b_evt,
+        pm1_evt_len,
+        gpe0_blk: gpe0,
+        gpe0_blk_len: gpe0_len,
+        gpe1_blk: gpe1,
+        gpe1_blk_len: gpe1_len,
+        smi_command,
+        acpi_enable,
+        hw_reduced,
     }
 }
 

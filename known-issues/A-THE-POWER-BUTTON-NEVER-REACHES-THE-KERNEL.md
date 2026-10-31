@@ -1,6 +1,9 @@
 ## A-THE-POWER-BUTTON-NEVER-REACHES-THE-KERNEL (lane A, 2026-10-31) — OPEN
 
-**Status:** OPEN
+**Status:** OPEN -- fixed on lane-a-wip (kernel/src/acpi/events.rs,
+design-decisions 1597): ACPI mode taken, the SCI handled, a press shuts down
+in order; checked in QEMU by every boot test, awaiting the test PC and a
+boot on main
 
 **In short:** pressing a PC's power button while SlateOS runs does not ask
 SlateOS to shut down: no kernel code handles the press. On the test PC a

@@ -6,9 +6,9 @@
 drives) joins the operator's home network for its real-network tests,
 rather than a separate test network. The network's name and password are
 kept in a file on the operator's PC outside every repository; the boot
-medium written to the test PC's E: drive carries a copy, and only the WiFi
-driver process may read it there. Neither is ever committed or printed in a
-log.
+image the PiKVM presents to the test PC as a USB drive carries a copy, and
+there only the WiFi driver process may read it. Neither is ever committed or
+printed in a log.
 
 ### The decision
 
@@ -37,7 +37,10 @@ log.
 
 ### Consequences
 
-The home network's password is on the test PC's E: drive while a boot
-medium carrying it is there, readable by anyone with that drive -- the cost
-option A states. The test PC's C: drive is never written
-(`blk.writable` names E: alone), so it holds no copy.
+The home network's password is in every boot image staged for a WiFi
+run: the one kept on the PiKVM (`slateos-pikvm.img`, replaced by each
+upload) and the staged copy on the operator's PC under the worktree's
+`build/`, which git ignores -- readable by anyone with either, the cost
+option A states. Neither of the test PC's disks holds it: the kernel keeps
+it in memory, on the sealed filesystem it places it on, and writes it
+nowhere.

@@ -369,7 +369,9 @@ pub fn self_test() -> KernelResult<()> {
     // A kernel task inside a namespace resolves its paths there, and only
     // while it is: a mount made inside lands in that namespace's table, and
     // the root's own lookups never see it.
-    let entered = entered_check()?.or(sealed_check()?);
+    // Each part's failure said, not only the first: one does not hide another.
+    let [sealed, copied_sealed] = sealed_check()?;
+    let parts = [entered_check()?, sealed, copied_sealed];
     if !copied {
         return fail("a new namespace did not start with a copy of the root's mounts");
     }
@@ -379,8 +381,13 @@ pub fn self_test() -> KernelResult<()> {
     if !(held && survives && gone) {
         return fail("a namespace's table did not live exactly as long as its holds");
     }
-    if let Some(what) = entered {
-        return fail(what);
+    let mut failed = false;
+    for what in parts.into_iter().flatten() {
+        serial_println!("[mntns]   FAIL: {}", what);
+        failed = true;
+    }
+    if failed {
+        return Err(KernelError::InternalError);
     }
     serial_println!(
         "[mntns]   a copy of the table, a private mount, freed with the last hold; a kernel task's paths resolved in a namespace it entered, and only while it was in it: OK"
@@ -390,15 +397,15 @@ pub fn self_test() -> KernelResult<()> {
 
 /// [`seal`] checked: a process entering a namespace gets past the seal's
 /// refusal only while there is none, a copy of a sealed namespace is sealed,
-/// and the seal goes with the namespace.
-/// What was not so, `None` when all was. No process is moved: the pid
-/// entered with names none, which an open namespace's entry finds after
-/// the seal's check, and a sealed one's never reaches.
+/// and the seal goes with the namespace: what was not so of the entry and
+/// of the copy, each `None` when it was. No process is moved: the pid
+/// entered with names none, which an open namespace's entry finds after the
+/// seal's check, and a sealed one's never reaches.
 ///
 /// # Errors
 ///
 /// [`create_from`]'s.
-fn sealed_check() -> KernelResult<Option<&'static str>> {
+fn sealed_check() -> KernelResult<[Option<&'static str>; 2]> {
     use crate::nsfs::NsKind;
     const NO_SUCH_PROCESS: ProcessId = ProcessId::MAX;
     let ns = create_from(ROOT)?;
@@ -406,19 +413,25 @@ fn sealed_check() -> KernelResult<Option<&'static str>> {
     seal(ns);
     let shut = crate::nsfs::enter(NO_SUCH_PROCESS, NsKind::Mnt, ns);
     let copy = create_from(ns)?;
-    let sealed = is_sealed(ns) && is_sealed(copy);
+    let sealed = is_sealed(ns);
+    let copy_sealed = is_sealed(copy);
     release(copy);
     release(ns);
     // The entries refused took no hold: the namespace went with this one.
     let gone = !exists(ns) && !is_sealed(ns);
-    Ok(match (open, shut) {
-        (Err(KernelError::NoSuchProcess), Err(KernelError::PermissionDenied)) if sealed && gone => {
-            None
-        }
-        _ => Some(
-            "a sealed namespace's entry was not refused, a refused entry kept a hold, or the seal outlived its namespace",
-        ),
-    })
+    Ok([
+        match (open, shut) {
+            (Err(KernelError::NoSuchProcess), Err(KernelError::PermissionDenied))
+                if sealed && gone =>
+            {
+                None
+            }
+            _ => Some(
+                "a sealed namespace's entry was not refused, a refused entry kept a hold, or the seal outlived its namespace",
+            ),
+        },
+        (!copy_sealed).then_some("a copy of a sealed namespace was not sealed"),
+    ])
 }
 
 /// [`in_namespace`] checked: what was not so, `None` when all was.

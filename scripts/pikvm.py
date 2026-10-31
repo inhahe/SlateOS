@@ -6,7 +6,7 @@ a network device that captures its screen, acts as its keyboard, mouse and a
 USB drive, and works its power button. This script is how a session drives it:
 
     python scripts/pikvm.py status
-    python scripts/pikvm.py stage <worktree> -o <img> [--cmdline "..."] [--add-cmdline "..."] [--no-linuxdrv]
+    python scripts/pikvm.py stage <worktree> -o <img> [--cmdline "..."] [--add-cmdline "..."] [--no-linuxdrv] [--wifi FILE]
     python scripts/pikvm.py boot <img>          # upload, restart, pick it at F12
     python scripts/pikvm.py watch --seconds 90  # screenshots until the screen settles
     python scripts/pikvm.py snap <out.png> [--crop X0,Y0,X1,Y1]
@@ -24,7 +24,11 @@ add `linuxdrv.card=00:1f.6`; for Linux's mt7925e on its RZ717 WiFi card, which
 scans and says the networks it finds, `linuxdrv.wifi=06:00.0` (and
 `selftest.only=Linuxdrv` to run only those); `--no-linuxdrv` leaves the
 driver processes off, and their self-test with them. The firmware the drivers
-load (`linuxdrv/firmware.pin`) is staged with them.
+load (`linuxdrv/firmware.pin`) is staged with them. `--wifi ~/.slateos-wifi`
+stages a WiFi network file -- an `ssid=` line and a `psk=` line, kept outside
+the repository -- which mt7925e then joins after its scan, serving the
+network to the netstack daemon (design-decisions 1596). The image then holds
+the passphrase; nothing here prints it.
 
 The PiKVM's address and login are read from `~/.pikvm` -- JSON with `url`,
 `user`, `password` and, for `boot`, `boot_entry_xy`: where on the screen the
@@ -71,6 +75,41 @@ HELLO_BOOT_FW = "slateos/hello.fw"
 HELLO_BOOT_FW_FILE = Path("linuxdrv") / "hello" / "hello.fw"
 #: The name the image is kept under on the PiKVM.
 IMAGE_NAME = "slateos-pikvm.img"
+#: The WiFi network file's path on the ESP, and its module's name: the
+#: kernel places it under /.boot-wifi (linuxdrv::mount_boot_wifi).
+WIFI_NETWORK = "wifi/network"
+
+
+def network_file_problem(data: bytes) -> str | None:
+    """What is wrong with `data` as a WiFi network file, as the driver
+    process reads one (linuxdrv/emul/lx_wifi.c, lx_wifi_network_parse):
+    lines, a CR before each LF allowed, blank ones passed over, each else
+    `ssid=<name>` -- 1 to 32 bytes -- or `psk=<passphrase>` -- 8 to 63
+    printable ASCII characters -- each once. None when nothing is. Never
+    quotes what it holds: the passphrase is in it."""
+    named = keyed = False
+    for line in data.split(b"\n"):
+        if line.endswith(b"\r"):
+            line = line[:-1]
+        if line.startswith(b"ssid=") and len(line) > 5:
+            if named:
+                return "it has two ssid= lines"
+            if len(line) - 5 > 32:
+                return "its ssid= is longer than 32 bytes"
+            named = True
+        elif line.startswith(b"psk=") and len(line) > 4:
+            if keyed:
+                return "it has two psk= lines"
+            if not 8 <= len(line) - 4 <= 63:
+                return "its psk= is not 8 to 63 characters long"
+            if any(b < 0x20 or b > 0x7E for b in line[4:]):
+                return "its psk= holds a character that is not printable ASCII"
+            keyed = True
+        elif line:
+            return "it has a line that is neither ssid=<name> nor psk=<passphrase>"
+    if not (named and keyed):
+        return "it has no psk= line" if named else "it has no ssid= line"
+    return None
 
 
 def linux_drivers(worktree: Path) -> tuple[str, ...]:
@@ -171,14 +210,15 @@ def to_absolute(pixel: int, size: int) -> int:
 
 
 def limine_conf(template: str, cmdline: str, modules: tuple[str, ...] = (),
-                firmware: tuple[str, ...] = ()) -> str:
+                firmware: tuple[str, ...] = (), wifi: bool = False) -> str:
     """`template` (the repository's limine.conf) with `cmdline` on its first
     entry, the line after that entry's `kernel_path:` -- as boot-test.sh
     gives the test's command line -- and after it each Linux driver process
     of `modules` as a module, `linuxdrv/<name>.elf` named `linuxdrv/<name>`,
     then each firmware file of `firmware` (paths under the ESP's firmware/),
     `firmware/<path>` named so, which the kernel puts at <path> under
-    /.boot-firmware."""
+    /.boot-firmware, and with `wifi` the WiFi network file, `wifi/network`,
+    which it puts under /.boot-wifi."""
     out, entry, done = [], 0, False
     for line in template.splitlines(keepends=True):
         if line.startswith("/"):
@@ -192,6 +232,9 @@ def limine_conf(template: str, cmdline: str, modules: tuple[str, ...] = (),
             for path in firmware:
                 out.append(f"    module_path: boot():/firmware/{path}\n")
                 out.append(f"    module_cmdline: firmware/{path}\n")
+            if wifi:
+                out.append(f"    module_path: boot():/{WIFI_NETWORK}\n")
+                out.append(f"    module_cmdline: {WIFI_NETWORK}\n")
             done = True
     if not done:
         raise ValueError("limine.conf has no first entry with a kernel_path")
@@ -431,11 +474,26 @@ def build_linux_drivers(worktree: Path, names: tuple[str, ...]) -> None:
             sys.exit(f"pikvm: the Linux driver process {name} did not build (above)")
 
 
-def stage(worktree: Path, out: Path, cmdline: str, linuxdrv: bool = True) -> None:
+def stage(worktree: Path, out: Path, cmdline: str, linuxdrv: bool = True,
+          wifi: Path | None = None) -> None:
     """Build the USB image of `worktree`'s built kernel at `out` -- its Linux
     driver processes built first, unless `linuxdrv` is false -- from an ESP
-    tree laid out in a scratch directory that is gone afterwards."""
+    tree laid out in a scratch directory that is gone afterwards; with `wifi`,
+    the WiFi network file there, checked first (network_file_problem), which
+    the image then carries -- the passphrase in it, said nowhere
+    (design-decisions 1596)."""
     names = linux_drivers(worktree) if linuxdrv else ()
+    network = None
+    if wifi is not None:
+        if not linuxdrv:
+            sys.exit("pikvm: --wifi is for the WiFi driver process, and --no-linuxdrv leaves it off")
+        try:
+            network = wifi.read_bytes()
+        except OSError as e:
+            sys.exit(f"pikvm: the WiFi network file {wifi} could not be read: {e.strerror}")
+        problem = network_file_problem(network)
+        if problem:
+            sys.exit(f"pikvm: the WiFi network file {wifi} is not one: {problem}")
     for option in ("linuxdrv.card=", "linuxdrv.wifi="):
         if not linuxdrv and option in cmdline:
             sys.exit(f"pikvm: {option[:-1]} asks for a Linux driver run, and --no-linuxdrv "
@@ -451,7 +509,7 @@ def stage(worktree: Path, out: Path, cmdline: str, linuxdrv: bool = True) -> Non
         firmware = tuple(p.as_posix() for p in linuxfw.fetch(worktree))
         build_linux_drivers(worktree, names)
     with tempfile.TemporaryDirectory(prefix="pikvm-esp-") as scratch:
-        stage_esp(worktree, Path(scratch), cmdline, names, firmware=firmware)
+        stage_esp(worktree, Path(scratch), cmdline, names, firmware=firmware, wifi=network)
         subprocess.run([sys.executable, str(HERE / "build-usb-image.py"), "--source", scratch,
                         "--output", str(out)], check=True)
 
@@ -471,15 +529,17 @@ def limine_path(worktree: Path) -> Path:
 
 
 def stage_esp(worktree: Path, esp: Path, cmdline: str, modules: tuple[str, ...],
-              strip_kernel: bool = True, firmware: tuple[str, ...] = ()) -> None:
+              strip_kernel: bool = True, firmware: tuple[str, ...] = (),
+              wifi: bytes | None = None) -> None:
     """Lay out an ESP in `esp`: Limine, `worktree`'s built kernel (stripped of
     its debug sections when `strip_kernel` and llvm-strip is there), the
     Linux driver processes `modules` names from build/linuxdrv/ -- each
     required -- the firmware files `firmware` names from build/firmware/
     (linuxfw.py's; each required) under firmware/, with hello's own test
-    file there when hello is staged, as boot-test.sh stages it, and its
-    limine.conf with `cmdline` on the first entry, the driver processes and
-    the firmware as its modules."""
+    file there when hello is staged, as boot-test.sh stages it, `wifi` as
+    the WiFi network file (WIFI_NETWORK) when given, and its limine.conf with
+    `cmdline` on the first entry, the driver processes, the firmware and the
+    network file as its modules."""
     (esp / "EFI" / "BOOT").mkdir(parents=True)
     (esp / "boot").mkdir()
     shutil.copy(limine_path(worktree), esp / "EFI" / "BOOT" / "BOOTX64.EFI")
@@ -511,9 +571,13 @@ def stage_esp(worktree: Path, esp: Path, cmdline: str, modules: tuple[str, ...],
         (esp / "firmware" / HELLO_BOOT_FW).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(worktree / HELLO_BOOT_FW_FILE, esp / "firmware" / HELLO_BOOT_FW)
         staged.append(HELLO_BOOT_FW)
+    if wifi is not None:
+        (esp / WIFI_NETWORK).parent.mkdir(parents=True, exist_ok=True)
+        (esp / WIFI_NETWORK).write_bytes(wifi)
     template = (worktree / "limine.conf").read_text(encoding="utf-8")
-    (esp / "limine.conf").write_text(limine_conf(template, cmdline, modules, tuple(staged)),
-                                     encoding="utf-8", newline="\n")
+    (esp / "limine.conf").write_text(
+        limine_conf(template, cmdline, modules, tuple(staged), wifi=wifi is not None),
+        encoding="utf-8", newline="\n")
 
 
 def boot(kvm: PiKvm, image: Path, menu_key: str) -> None:
@@ -742,6 +806,19 @@ def self_test() -> int:
             check("stage: firmware asked for and not fetched is refused", "staged", "refused")
         except FileNotFoundError:
             pass
+        network = b"ssid=home\r\npsk=v+r%a8pqq\r\n"
+        esp6 = Path(tmp) / "esp6"
+        stage_esp(wt, esp6, "a=1", ("hello",), strip_kernel=False, firmware=(fw,), wifi=network)
+        conf = (esp6 / "limine.conf").read_text(encoding="utf-8")
+        check("stage: the WiFi network file copied as wifi/network, a module after the firmware",
+              ((esp6 / "wifi" / "network").read_bytes(),
+               "    module_path: boot():/wifi/network\n    module_cmdline: wifi/network\n" in conf,
+               conf.find(f"module_cmdline: firmware/{fw}") < conf.find("module_cmdline: wifi/network"),
+               conf.rfind("module_path") < conf.find("/OS Kernel (recovery)")),
+              (network, True, True, True))
+        check("stage: no WiFi network file asked for, none staged",
+              ((esp4 / "wifi").exists(), "wifi/network" in (esp4 / "limine.conf").read_text(encoding="utf-8")),
+              (False, False))
         esp2 = Path(tmp) / "esp2"
         stage_esp(wt, esp2, "a=1", (), strip_kernel=False)
         check("stage: none asked for, none staged",
@@ -754,6 +831,31 @@ def self_test() -> int:
             check("stage: a driver process asked for and not built is refused", "staged", "refused")
         except FileNotFoundError:
             pass
+    for label, data, want in [
+        ("a name and a passphrase", b"ssid=home\npsk=12345678\n", None),
+        ("CRLF lines, blank ones, either order", b"\r\npsk=a b%c+d!\r\n\r\nssid=x\r\n", None),
+        ("no passphrase", b"ssid=home\n", "it has no psk= line"),
+        ("no name", b"psk=12345678\n", "it has no ssid= line"),
+        ("a passphrase of 7", b"ssid=h\npsk=1234567\n", "its psk= is not 8 to 63 characters long"),
+        ("a passphrase of 64", b"ssid=h\npsk=" + b"1" * 64 + b"\n", "its psk= is not 8 to 63 characters long"),
+        ("a tab in the passphrase", b"ssid=h\npsk=1234\t5678\n",
+         "its psk= holds a character that is not printable ASCII"),
+        ("a name of 33 bytes", b"ssid=" + b"n" * 33 + b"\npsk=12345678\n", "its ssid= is longer than 32 bytes"),
+        ("two names", b"ssid=a\nssid=b\npsk=12345678\n", "it has two ssid= lines"),
+        ("an empty name", b"ssid=\npsk=12345678\n",
+         "it has a line that is neither ssid=<name> nor psk=<passphrase>"),
+        ("another line", b"ssid=h\npsk=12345678\nhidden=1\n",
+         "it has a line that is neither ssid=<name> nor psk=<passphrase>"),
+    ]:
+        check(f"WiFi network file: {label}", network_file_problem(data), want)
+    lx_wifi = (HERE.parent / "linuxdrv" / "emul" / "lx_wifi.c").read_text(encoding="utf-8")
+    check("WiFi network file: each refusal is the driver's own words, so the two read alike",
+          all(f'"{why}"' in lx_wifi for why in (
+              "it has no psk= line", "it has no ssid= line", "it has two ssid= lines",
+              "it has two psk= lines", "its ssid= is longer than 32 bytes",
+              "its psk= is not 8 to 63 characters long",
+              "its psk= holds a character that is not printable ASCII",
+              "it has a line that is neither ssid=<name> nor psk=<passphrase>")), True)
     try:
         limine_conf("timeout: 3\n", "x")
         check("limine.conf without an entry is refused", "taken", "refused")
@@ -975,6 +1077,10 @@ def main(argv: list[str]) -> int:
                    help="words added to the command line (the default's, or --cmdline's)")
     p.add_argument("--no-linuxdrv", action="store_true",
                    help="leave the Linux driver processes off, and their self-test with them")
+    p.add_argument("--wifi", type=Path, default=None,
+                   help="a WiFi network file -- ssid= and psk= lines, kept outside the "
+                        "repository, as ~/.slateos-wifi -- for the WiFi driver process to join "
+                        "the network it names, with linuxdrv.wifi=")
     p = sub.add_parser("boot")
     p.add_argument("image", type=Path)
     p.add_argument("--menu-key", default="F12")
@@ -996,7 +1102,8 @@ def main(argv: list[str]) -> int:
 
     if args.cmd == "stage":
         cmdline = " ".join(w for w in (args.cmdline, args.add_cmdline) if w)
-        stage(args.worktree, args.output, cmdline, linuxdrv=not args.no_linuxdrv)
+        stage(args.worktree, args.output, cmdline, linuxdrv=not args.no_linuxdrv,
+              wifi=args.wifi)
         return 0
     kvm = PiKvm()
     try:

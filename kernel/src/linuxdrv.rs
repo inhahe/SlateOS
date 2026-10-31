@@ -203,7 +203,9 @@ fn run(
 /// - [`e1000e_run`]: Linux's e1000e on that card -- or on the one
 ///   `linuxdrv.card` names -- serving it to the netstack daemon.
 /// - [`wifi_runs`]: Linux's mt7925e with its 802.11 stack, started with no
-///   card, or scanning with the one `linuxdrv.wifi` names.
+///   card, or scanning with the one `linuxdrv.wifi` names -- and joining the
+///   network the boot medium's WiFi network file names, serving it to the
+///   netstack daemon, where there is one.
 /// - [`hwsim_run`]: Linux's mac80211_hwsim, two simulated radios on that
 ///   stack, one made an access point the other must find, join and pass a
 ///   frame each way across -- open, then protected by WPA2.
@@ -478,7 +480,10 @@ fn hwsim_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
 /// probed nothing. Given `named`, the card `linuxdrv.wifi` names
 /// ([`named_card`]), and the right to read its firmware ([`firmware_reading`]), its
 /// "scan" run must bind the card, bring its interface up, have nl80211 scan
-/// and say what it found (`linuxdrv/emul/lx_wifi.c`), and exit 0. Which ran
+/// and say what it found (`linuxdrv/emul/lx_wifi.c`), and exit 0; and where
+/// the boot medium carries a WiFi network file ([`mount_boot_wifi`]), its
+/// join run must join that network and serve it ([`wifi_join_run`]),
+/// skipped and recorded so where it does not. Which ran
 /// -- `Some(true)` the card's scan -- or `None`, skipped and recorded so,
 /// where the bootloader did not load it (never with a card named:
 /// [`self_test`] refuses that first).
@@ -541,7 +546,133 @@ fn wifi_runs(
         "bound the card, brought its interface up, had nl80211 scan and said what it found",
         || None,
     )?;
+    if let Some(network) = wifi_reading()? {
+        wifi_join_run(elf, &arg, &caps, network)?;
+    } else {
+        skips.record(
+            "Linux's mt7925e joining a network",
+            "no WiFi network file on the boot medium (scripts/pikvm.py stage --wifi)",
+        );
+    }
     Ok(Some(true))
+}
+
+/// The service a joined WiFi card is served as: `serve=wifi`.
+const WIFI_SERVICE: &[u8] = b"nic.wifi";
+
+/// The card's network joined and served (design-decisions 1596): Linux's
+/// mt7925e started with `join=`[`WIFI_NETWORK_FILE`] -- holding the right to
+/// read it (`network`, [`wifi_reading`]) beside the card's and its
+/// firmware's (`capabilities`) -- joining the network the file names, then
+/// serving its interface to the network stack as [`WIFI_SERVICE`] within
+/// 90 s, to two stacks in turn, as e1000e on a named card's network serves
+/// its: the netstack daemon's `nic-check` (`lan`) -- an address by DHCP,
+/// the gateway answering ARP and its pings -- then the daemon serving
+/// sockets over it ([`serve_sockets`]), through which a name must resolve,
+/// the network being a real one; and the driver ending 0 once both have
+/// gone.
+///
+/// # Errors
+///
+/// `InternalError`, said, when any of that did not happen.
+fn wifi_join_run(
+    elf: &[u8],
+    pci: &str,
+    capabilities: &[(ResourceType, u64, Rights)],
+    network: (ResourceType, u64, Rights),
+) -> KernelResult<()> {
+    /// How long firmware, a scan and a join may take before the card is served.
+    const WIFI_JOIN_S: u64 = 90;
+    let service = crate::ipc::service::key_id(WIFI_SERVICE);
+    let mut caps = alloc::vec::Vec::from(capabilities);
+    caps.push(network);
+    caps.push((ResourceType::Service, service, Rights::WRITE));
+    let join = alloc::format!("join={WIFI_NETWORK_FILE}");
+    let program = Program {
+        elf,
+        name: "lx-mt7925e",
+        driver: true,
+        limit_s: WIFI_JOIN_S + 120,
+        poll_ms: 0,
+    };
+    let driver = start(
+        &program,
+        &[
+            b"mt7925e",
+            pci.as_bytes(),
+            join.as_bytes(),
+            b"serve=wifi",
+            b"stacks=2",
+        ],
+        &caps,
+    )?;
+    let fail = |what: &str, driver: &spawn::SpawnResult| {
+        let ended = stop(driver);
+        serial_println!(
+            "[linuxdrv]   FAIL: the mt7925e process joining its network {what} (it ended {ended:?}{}; its log says why)",
+            ended
+                .and_then(exit_meaning)
+                .map_or(alloc::string::String::new(), |m| alloc::format!(": {m}"))
+        );
+        KernelError::InternalError
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(WIFI_JOIN_S * 1_000_000_000);
+    while !crate::ipc::service::is_registered(WIFI_SERVICE) {
+        let alive = pcb::state(driver.pid).is_some_and(|s| s != pcb::ProcessState::Zombie);
+        if !alive {
+            return Err(fail("ended before it served the card", &driver));
+        }
+        if crate::hrtimer::now_ns() >= deadline {
+            return Err(fail(
+                &alloc::format!("did not serve the card within {WIFI_JOIN_S} s"),
+                &driver,
+            ));
+        }
+        crate::sched::sleep_ms(100);
+    }
+    let stack = Program {
+        elf: spawn::NETSTACK_ELF,
+        name: "netstack-nic",
+        driver: false,
+        limit_s: 90,
+        poll_ms: DAEMON_POLL_MS,
+    };
+    let checked = start(
+        &stack,
+        &[b"netstack", b"nic-check", WIFI_SERVICE, check::mode::LAN],
+        &[(ResourceType::Service, service, Rights::READ)],
+    )
+    .map(|daemon| finish(&stack, &daemon));
+    if checked != Ok(Some(check::OK)) {
+        return Err(fail(
+            &alloc::format!(
+                "was served, but the netstack daemon checking the network over it ended {checked:?} ({})",
+                nic_check_outcome(&checked)
+            ),
+            &driver,
+        ));
+    }
+    let Some(Resolved::To(ip)) = serve_sockets(WIFI_SERVICE, service, false) else {
+        return Err(fail(
+            "was served and checked, but a name asked through it did not resolve (said above)",
+            &driver,
+        ));
+    };
+    let served = finish(&program, &driver);
+    if served != Some(EXIT_OK) {
+        serial_println!(
+            "[linuxdrv]   FAIL: the mt7925e process that joined its network and served it ended {served:?}, not {EXIT_OK}, once its two stacks had gone"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[linuxdrv]   mt7925e joined the network its boot medium names (WPA2) and served it: the netstack daemon took an address by DHCP over it, the gateway answered its pings, and example.com resolved to {}.{}.{}.{} through it: OK",
+        ip[0],
+        ip[1],
+        ip[2],
+        ip[3]
+    );
+    Ok(())
 }
 
 /// `parse_pci_address` at its edges, as the operator's `linuxdrv.card`
@@ -650,13 +781,15 @@ static BOOT_FIRMWARE_PLACED: core::sync::atomic::AtomicBool =
 /// it the file's path under [`BOOT_FIRMWARE_DIR`].
 const FIRMWARE_MODULE: &[u8] = b"firmware/";
 
-/// `name`, a module's, as a firmware file's path under
-/// [`BOOT_FIRMWARE_DIR`]: what follows [`FIRMWARE_MODULE`], as bytes, as a
-/// path is. `None` for a module that is not firmware; why not, for one whose
-/// path is no path -- empty, or with an empty, `.` or `..` component, any of
-/// which would put the file elsewhere or nowhere.
-fn firmware_module_path(name: &[u8]) -> Option<Result<&[u8], &'static str>> {
-    let path = name.strip_prefix(FIRMWARE_MODULE)?;
+/// `name`, a module's, as the path of a file the boot medium carries under
+/// the directory `prefix`'s files are placed in -- [`FIRMWARE_MODULE`]'s
+/// under [`BOOT_FIRMWARE_DIR`], [`WIFI_MODULE`]'s under [`BOOT_WIFI_DIR`]:
+/// what follows `prefix`, as bytes, as a path is. `None` for a module not
+/// named so; why not, for one whose path is no path -- empty, or with an
+/// empty, `.` or `..` component, any of which would put the file elsewhere
+/// or nowhere.
+fn module_path<'a>(prefix: &[u8], name: &'a [u8]) -> Option<Result<&'a [u8], &'static str>> {
+    let path = name.strip_prefix(prefix)?;
     if path
         .split(|&b| b == b'/')
         .any(|c| c.is_empty() || c == b"." || c == b"..")
@@ -670,26 +803,27 @@ fn firmware_module_path(name: &[u8]) -> Option<Result<&[u8], &'static str>> {
 /// [`BOOT_FIRMWARE_DIR`], and its bytes.
 type FirmwareFile<'a> = (&'a [u8], &'a [u8]);
 
-/// A module [`firmware_files`] refused: its name, and why.
+/// A module [`module_files`] refused: its name, and why.
 #[derive(Debug, PartialEq, Eq)]
 struct FirmwareRefused<'a> {
     name: &'a [u8],
     why: &'static str,
 }
 
-/// The firmware files `modules` -- names and bytes, as
-/// [`crate::boot::modules`] gives them -- carry, in their order: each module
-/// named `firmware/<path>` as its path ([`firmware_module_path`]) and bytes,
-/// the rest passed over. The first module refused, for a path that is none,
-/// or that an earlier module's path names too or has as a directory, or the
-/// reverse -- any of which would leave one of them unplaced.
-fn firmware_files<'a>(
+/// The files `modules` -- names and bytes, as [`crate::boot::modules`] gives
+/// them -- carry under `prefix`, in their order: each module named
+/// `<prefix><path>` as its path ([`module_path`]) and bytes, the rest passed
+/// over. The first module refused, for a path that is none, or that an
+/// earlier module's path names too or has as a directory, or the reverse --
+/// any of which would leave one of them unplaced.
+fn module_files<'a>(
+    prefix: &[u8],
     modules: impl Iterator<Item = (&'a [u8], &'a [u8])>,
 ) -> Result<alloc::vec::Vec<FirmwareFile<'a>>, FirmwareRefused<'a>> {
     use crate::fs::path::Path;
     let mut files: alloc::vec::Vec<FirmwareFile<'a>> = alloc::vec::Vec::new();
     for (name, bytes) in modules {
-        let why = match firmware_module_path(name) {
+        let why = match module_path(prefix, name) {
             None => continue,
             Some(Err(why)) => why,
             Some(Ok(path)) if files.iter().any(|&(p, _)| p == path) => {
@@ -777,7 +911,7 @@ fn place_firmware(files: &[FirmwareFile<'_>], at: &str) -> KernelResult<(usize, 
 ///
 /// # Errors
 ///
-/// `InvalidArgument`, said, for a firmware module [`firmware_files`]
+/// `InvalidArgument`, said, for a firmware module [`module_files`]
 /// refuses: nothing is placed. [`place_firmware`]'s.
 pub fn mount_boot_firmware() -> KernelResult<(usize, usize)> {
     let loaded = crate::boot::module_count();
@@ -788,7 +922,7 @@ pub fn mount_boot_firmware() -> KernelResult<(usize, usize)> {
             loaded.saturating_sub(read)
         );
     }
-    let files = firmware_files(crate::boot::modules()).map_err(|refused| {
+    let files = module_files(FIRMWARE_MODULE, crate::boot::modules()).map_err(|refused| {
         serial_println!(
             "[boot] firmware module \"{}\": {}; no firmware placed",
             refused.name.escape_ascii(),
@@ -803,7 +937,64 @@ pub fn mount_boot_firmware() -> KernelResult<(usize, usize)> {
     Ok(placed)
 }
 
-/// [`firmware_module_path`] at its edges: each answer `None` (not
+/// Where the boot medium's WiFi network file is put ([`mount_boot_wifi`]): a
+/// mount point of its own, as [`BOOT_FIRMWARE_DIR`] is, sealed read-only,
+/// whose files only a WiFi driver process joining a network is given the
+/// right to read ([`wifi_reading`], design-decisions 1596).
+pub const BOOT_WIFI_DIR: &str = "/.boot-wifi";
+/// The `module_cmdline:` prefix that makes a module one of [`BOOT_WIFI_DIR`]'s
+/// files, what follows it the file's path there.
+const WIFI_MODULE: &[u8] = b"wifi/";
+/// The network file a WiFi driver process joins by (`join=`): an `ssid=`
+/// line and a `psk=` line, the passphrase, which nothing prints
+/// (`linuxdrv/emul/lx_wifi.c`). `scripts/pikvm.py stage --wifi` stages it.
+const WIFI_NETWORK_FILE: &str = "/.boot-wifi/network";
+/// Whether [`mount_boot_wifi`] placed a network file.
+static BOOT_WIFI_PLACED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The boot medium's WiFi network file -- every module limine.conf names
+/// `wifi/<path>` -- placed at `<path>` under [`BOOT_WIFI_DIR`], sealed
+/// read-only ([`place_firmware`]), as the firmware is. Whether one was: the
+/// file's contents and size are its own, and never said.
+///
+/// # Errors
+///
+/// `InvalidArgument`, said by name, for a module [`module_files`] refuses:
+/// nothing is placed. [`place_firmware`]'s.
+pub fn mount_boot_wifi() -> KernelResult<bool> {
+    let files = module_files(WIFI_MODULE, crate::boot::modules()).map_err(|refused| {
+        serial_println!(
+            "[boot] WiFi module \"{}\": {}; no network file placed",
+            refused.name.escape_ascii(),
+            refused.why
+        );
+        KernelError::InvalidArgument
+    })?;
+    let (placed, _) = place_firmware(&files, BOOT_WIFI_DIR)?;
+    if placed > 0 {
+        BOOT_WIFI_PLACED.store(true, core::sync::atomic::Ordering::Release);
+    }
+    Ok(placed > 0)
+}
+
+/// The right to read the boot medium's WiFi network file: a tree over
+/// [`BOOT_WIFI_DIR`] (design-decisions 1595, 1596), for a WiFi driver
+/// process that joins a network and no other. `None` when no network file
+/// was placed.
+///
+/// # Errors
+///
+/// The tree registry's (`fs::trees::register`).
+fn wifi_reading() -> KernelResult<Option<(ResourceType, u64, Rights)>> {
+    if !BOOT_WIFI_PLACED.load(core::sync::atomic::Ordering::Acquire) {
+        return Ok(None);
+    }
+    let id = crate::fs::trees::register(crate::fs::path::Path::new(BOOT_WIFI_DIR))?;
+    Ok(Some((ResourceType::FileTree, id, Rights::READ)))
+}
+
+/// [`module_path`] at its edges: each answer `None` (not
 /// firmware), `Some(None)` (refused) or the path.
 ///
 /// # Errors
@@ -829,7 +1020,7 @@ fn check_firmware_module_path() -> KernelResult<()> {
         (b"firmware/a/./x.bin", Some(None)),
     ];
     for (name, want) in cases {
-        let got = firmware_module_path(name).map(Result::ok);
+        let got = module_path(FIRMWARE_MODULE, name).map(Result::ok);
         if got != want {
             serial_println!(
                 "[linuxdrv]   FAIL: module \"{}\" read as firmware path {:?}, not {:?}",
@@ -843,7 +1034,7 @@ fn check_firmware_module_path() -> KernelResult<()> {
     check_firmware_files()
 }
 
-/// [`firmware_files`] over made-up module lists: a driver passed over, the
+/// [`module_files`] over made-up module lists: a driver passed over, the
 /// firmware in its order; nothing at all; a file two modules name, a file
 /// that is a directory on another's path -- either way round -- and a path
 /// that is none, each refused as the module that did it; a name that only
@@ -894,7 +1085,7 @@ fn check_firmware_files() -> KernelResult<()> {
         ),
     ];
     for (names, want) in cases {
-        let got = firmware_files(names.iter().map(|&n| (n, n)));
+        let got = module_files(FIRMWARE_MODULE, names.iter().map(|&n| (n, n)));
         if got != want {
             let shown = |r: &Result<alloc::vec::Vec<FirmwareFile<'_>>, FirmwareRefused<'_>>| match r
             {
@@ -919,13 +1110,23 @@ fn check_firmware_files() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
+    // The WiFi network's file, by its own prefix: firmware, and a name that
+    // is the prefix's word but not the prefix, passed over.
+    let names: &[&[u8]] = &[b"firmware/wifi/network", b"wifi/network", b"wifi"];
+    let wifi = module_files(WIFI_MODULE, names.iter().map(|&n| (n, n)));
+    if wifi != Ok(alloc::vec![(b"network" as &[u8], b"wifi/network" as &[u8])]) {
+        serial_println!(
+            "[linuxdrv]   FAIL: the WiFi network's prefix took other modules than wifi/network alone"
+        );
+        return Err(KernelError::InternalError);
+    }
     Ok(())
 }
 
 /// [`place_firmware`] at a scratch mount point under `/tmp`: nothing
 /// mounted for no files; two files placed, their bytes as given, where
 /// nothing may then write; and a placement that fails part-way -- a file
-/// where a later one wants a directory, which [`firmware_files`] refuses
+/// where a later one wants a directory, which [`module_files`] refuses
 /// but this is not given through it -- leaving nothing mounted. Skipped,
 /// and recorded so, where `/tmp` is not mounted.
 ///
@@ -1995,7 +2196,7 @@ fn e1000e_serve(
     };
     // Then sockets served over the card: the driver's second stack. A driver
     // whose stacks did not both come and go waits for one: not for its limit.
-    let sockets = checked == Some(check::OK) && serve_sockets(service, cable);
+    let sockets = checked == Some(check::OK) && serve_sockets(SERVICE, service, cable).is_some();
     let served = if sockets {
         finish(program, &driver)
     } else {
@@ -2027,21 +2228,31 @@ fn e1000e_serve(
     Err(KernelError::InternalError)
 }
 
+/// What a name asked through a card's served sockets came to
+/// ([`serve_sockets`]).
+enum Resolved {
+    /// An address.
+    To([u8; 4]),
+    /// Answered, unresolved: no DNS server beyond the card's network.
+    Unresolved,
+}
+
 /// Sockets served over the card: the netstack daemon as `serve-dns
-/// nic.spare` -- the driver's second stack -- holding the card's key
-/// (`card_key`) and the right to register `net.stack`. Once it has, attached
-/// and given an address by DHCP on the card, the kernel asks it to resolve a
-/// name, as a socket client asks, and it must answer: the name resolved, or
-/// not -- the boot test's host may have no upstream DNS, which is said, the
-/// card's frames having been proved by `nic-check` already. With `cable`
+/// <service>` -- the driver's second stack, `service` the card's name --
+/// holding the card's key (`card_key`) and the right to register
+/// `net.stack`. Once it has, attached and given an address by DHCP on the
+/// card, the kernel asks it to resolve a name, as a socket client asks, and
+/// it must answer: the name resolved, or not -- the boot test's host may
+/// have no upstream DNS, which is said, the card's frames having been
+/// proved by `nic-check` already. With `cable`
 /// -- the harness pulling the card's cable on QEMU's network
 /// ([`cable_puller`]) -- it is pulled and plugged back under the daemon,
 /// asked all the while ([`keep_asking`]),
 /// which must then confirm its lease and announce its addresses. Idle after,
 /// the daemon lets the card go and ends 0 -- not `check::LEASE`, its exit when
-/// a link came back and its lease was never confirmed. Whether all of that
-/// held; what did not is said.
-fn serve_sockets(card_key: u64, cable: bool) -> bool {
+/// a link came back and its lease was never confirmed. What the name came
+/// to, once all of that held; `None`, what did not said, when it did not.
+fn serve_sockets(service: &[u8], card_key: u64, cable: bool) -> Option<Resolved> {
     let program = Program {
         elf: spawn::NETSTACK_ELF,
         name: "netstack-serve",
@@ -2060,8 +2271,8 @@ fn serve_sockets(card_key: u64, cable: bool) -> bool {
     // With the cable to be pulled under it, the daemon is told to expect its
     // link back and to fail unless its lease is then confirmed.
     let relinking = cable;
-    let plain: &[&[u8]] = &[b"netstack", b"serve-dns", SERVICE];
-    let relink: &[&[u8]] = &[b"netstack", b"serve-dns", SERVICE, b"relink"];
+    let plain: &[&[u8]] = &[b"netstack", b"serve-dns", service];
+    let relink: &[&[u8]] = &[b"netstack", b"serve-dns", service, b"relink"];
     let daemon = match start(&program, if relinking { relink } else { plain }, &caps) {
         Ok(daemon) => daemon,
         Err(e) => {
@@ -2069,7 +2280,7 @@ fn serve_sockets(card_key: u64, cable: bool) -> bool {
                 "[linuxdrv]   FAIL: the netstack daemon serving sockets could not be started: {:?}",
                 e
             );
-            return false;
+            return None;
         }
     };
     // Attached, an address taken and `net.stack` registered: seconds, the
@@ -2108,7 +2319,7 @@ fn serve_sockets(card_key: u64, cable: bool) -> bool {
                     "[linuxdrv]   sockets served over the card: example.com answered unresolved (no upstream DNS behind the emulator?)"
                 ),
             }
-            true
+            Some(ip.map_or(Resolved::Unresolved, Resolved::To))
         }
         (answer, ended) => {
             serial_println!(
@@ -2117,7 +2328,7 @@ fn serve_sockets(card_key: u64, cable: bool) -> bool {
                 ended,
                 nic_check_outcome(&Ok(ended))
             );
-            false
+            None
         }
     }
 }

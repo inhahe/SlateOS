@@ -238,4 +238,11 @@ unsigned long lx_live_kthreads(void);
  */
 void lx_end_run(const char *who, int err) __attribute__((noreturn));
 
+/*
+ * lx_nic.c's wait before it serves its device, a weak default that answers
+ * 0 at once; lx_wifi.c's, given "join=", until its network is joined: 0, or
+ * why the device cannot be served.
+ */
+int lx_nic_await_link_layer(void);
+
 #endif /* LX_EMUL_H */

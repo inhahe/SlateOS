@@ -30,9 +30,14 @@
  *   frame crosses each way protected on the air, its payload never in
  *   clear. The process ends 0 only if every step did: the whole of the
  *   stack, its ciphers and the layer's use of them, where there is no card
- *   (the boot test).
- * - Neither, and given no card: the process ends once its initcalls are
- *   done. Given a card, the task does nothing.
+ *   (the boot test). The real join's network file and the access points it
+ *   judges are checked first, at their edges (lx_wifi_join_check).
+ * - "join=<path>": the network the file at <path> names, joined -- WPA2-PSK
+ *   from the station's side, against a real access point -- and, with
+ *   "serve=" too, the joined interface then served to the network stack
+ *   (lx_wifi_join_network, below, has the whole of it).
+ * - None of them, and given no card: the process ends once its initcalls
+ *   are done. Given a card, the task does nothing.
  *
  * A run that ends otherwise well, but in which Linux code warned anywhere --
  * the driver, the 802.11 stack, the layer -- ends as warned (SLX_EXIT_WARNED),
@@ -47,6 +52,7 @@
 #include <linux/scatterlist.h>
 #include <linux/etherdevice.h>
 #include <linux/ieee80211.h>
+#include <linux/kernel_read_file.h>
 #include <linux/key.h>
 #include <linux/kthread.h>
 #include <linux/netdevice.h>
@@ -56,6 +62,7 @@
 #include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <linux/verification.h>
+#include <linux/vmalloc.h>
 #include <keys/asymmetric-type.h>
 #include <net/cfg80211.h>
 #include <net/genetlink.h>
@@ -728,9 +735,15 @@ static void lx_wifi_ap_message(struct lx_wifi_ap *ap, struct sk_buff *msg)
 	ap->err = err;
 }
 
-/* The network a station connects to: the access point's address, and whether it is protected. */
+/*
+ * The network a station connects to: its name, the access point's address
+ * and frequency, and whether it is protected.
+ */
 struct lx_wifi_connect {
+	const u8 *ssid;
+	size_t ssid_len;
 	const u8 *bssid;
+	u32 freq;
 	bool wpa2;
 };
 
@@ -743,9 +756,9 @@ static int lx_wifi_connect_params(struct sk_buff *req, struct net_device *dev, c
 {
 	const struct lx_wifi_connect *c = arg;
 
-	return nla_put(req, NL80211_ATTR_SSID, strlen(LX_WIFI_SSID), LX_WIFI_SSID) ||
+	return nla_put(req, NL80211_ATTR_SSID, c->ssid_len, c->ssid) ||
 	       nla_put(req, NL80211_ATTR_MAC, ETH_ALEN, c->bssid) ||
-	       nla_put_u32(req, NL80211_ATTR_WIPHY_FREQ, LX_WIFI_FREQ) ||
+	       nla_put_u32(req, NL80211_ATTR_WIPHY_FREQ, c->freq) ||
 	       nla_put_u32(req, NL80211_ATTR_AUTH_TYPE, NL80211_AUTHTYPE_OPEN_SYSTEM) ||
 	       (c->wpa2 && (lx_wifi_put_wpa2(req) ||
 			    nla_put(req, NL80211_ATTR_IE, sizeof(lx_wifi_rsn), lx_wifi_rsn)));
@@ -859,7 +872,13 @@ static int lx_wifi_join(const struct genl_family *nl80211, struct lx_wifi_ap *ap
 			struct net_device *sta_dev)
 {
 	struct net_device *ap_dev = ap->dev;
-	const struct lx_wifi_connect connect = { .bssid = ap_dev->dev_addr, .wpa2 = ap->wpa2 };
+	const struct lx_wifi_connect connect = {
+		.ssid = (const u8 *)LX_WIFI_SSID,
+		.ssid_len = strlen(LX_WIFI_SSID),
+		.bssid = ap_dev->dev_addr,
+		.freq = LX_WIFI_FREQ,
+		.wpa2 = ap->wpa2,
+	};
 	unsigned long until = jiffies + LX_WIFI_JOIN_S * HZ;
 	struct lx_wifi_connected c = {};
 	bool ended = false;
@@ -1726,6 +1745,512 @@ static int lx_wifi_ccm_check(void)
 	return err ?: wrong ? -EBADMSG : 0;
 }
 
+/*
+ * "join=<path>": a real network joined, as wpa_supplicant joins one. The
+ * file at <path> -- on the boot medium, which only this process may read
+ * (the kernel's linuxdrv::wifi_reading) -- names it: an "ssid=" line, its
+ * name, and a "psk=" line, its WPA2 passphrase, which nothing here ever
+ * says. The card scans; of the access points that answer to the name, the
+ * strongest whose RSN element SlateOS can join (lx_wifi_rsn_why) is joined
+ * (NL80211_CMD_CONNECT) -- the next, should one refuse -- and the four-way
+ * handshake made as the station (lx_wifi_supplicant), its keys installed
+ * and its port opened. With "serve=" as well, the joined interface is then
+ * served to the network stack (lx_nic.c, which waits for this:
+ * lx_nic_await_link_layer); without, the process ends 0 once joined.
+ */
+
+/* The most a network file may hold, and the access points tried in turn. */
+#define LX_WIFI_NETWORK_MAX 512
+#define LX_WIFI_CANDIDATES 4
+
+/* An RSN element's capability: management frame protection required (802.11-2020 9.4.2.24.4). */
+#define LX_WIFI_RSN_CAP_MFPR BIT(6)
+
+/* A network file read: the network's name, and its passphrase, NUL-terminated. */
+struct lx_wifi_network {
+	u8 ssid[IEEE80211_MAX_SSID_LEN];
+	size_t ssid_len;
+	char psk[64];
+};
+
+/*
+ * The `len` bytes at `buf`, a network file, read into `n`: lines ending in
+ * "\n" or "\r\n", blank ones passed over, each else "ssid=<name>" -- 1 to
+ * 32 bytes, any -- or "psk=<passphrase>" -- 8 to 63 printable ASCII
+ * characters, as WPA2 has a passphrase -- each once. NULL, or what is wrong
+ * with it, which never quotes it.
+ */
+static const char *lx_wifi_network_parse(const char *buf, size_t len, struct lx_wifi_network *n)
+{
+	const char *p = buf, *end = buf + len;
+	bool named = false, keyed = false;
+
+	while (p < end) {
+		const char *nl = memchr(p, '\n', end - p);
+		size_t l = (nl ? nl : end) - p;
+		size_t i;
+
+		if (l && p[l - 1] == '\r')
+			l--;
+		if (l > 5 && !memcmp(p, "ssid=", 5)) {
+			if (named)
+				return "it has two ssid= lines";
+			if (l - 5 > IEEE80211_MAX_SSID_LEN)
+				return "its ssid= is longer than 32 bytes";
+			memcpy(n->ssid, p + 5, l - 5);
+			n->ssid_len = l - 5;
+			named = true;
+		} else if (l > 4 && !memcmp(p, "psk=", 4)) {
+			if (keyed)
+				return "it has two psk= lines";
+			if (l - 4 < 8 || l - 4 > 63)
+				return "its psk= is not 8 to 63 characters long";
+			for (i = 4; i < l; i++)
+				if (p[i] < 0x20 || p[i] > 0x7e)
+					return "its psk= holds a character that is not printable ASCII";
+			memcpy(n->psk, p + 4, l - 4);
+			n->psk[l - 4] = '\0';
+			keyed = true;
+		} else if (l) {
+			return "it has a line that is neither ssid=<name> nor psk=<passphrase>";
+		}
+		p = nl ? nl + 1 : end;
+	}
+	if (!named || !keyed)
+		return named ? "it has no psk= line" : "it has no ssid= line";
+	return NULL;
+}
+
+/*
+ * Why an access point whose RSN element is `ie` (NULL for none) cannot be
+ * joined as this layer joins -- WPA2-PSK, CCMP for both keys, management
+ * frames unprotected, which is the station's own element (lx_wifi_rsn) --
+ * or NULL when it can: version 1, a CCMP group cipher, CCMP among its
+ * pairwise ciphers, PSK among its key managements (a WPA2/WPA3 network
+ * offers SAE beside it), and management frame protection not required.
+ */
+static const char *lx_wifi_rsn_why(const u8 *ie)
+{
+	static const char *const malformed = "its RSN element is malformed";
+	const u8 *p;
+	size_t len, i;
+	bool ccmp = false, psk = false, sae = false;
+	u16 count;
+
+	if (!ie)
+		return "it is not protected by WPA2 (it advertises no RSN element)";
+	p = ie + 2;
+	len = ie[1];
+	if (len < 2 || get_unaligned_le16(p) != 1)
+		return "its RSN element is not version 1";
+	p += 2;
+	len -= 2;
+	if (len < 4)
+		return malformed;
+	if (get_unaligned_be32(p) != WLAN_CIPHER_SUITE_CCMP)
+		return "its group cipher is not CCMP (AES) -- TKIP, perhaps, which SlateOS does not join";
+	p += 4;
+	len -= 4;
+	if (len < 2)
+		return malformed;
+	count = get_unaligned_le16(p);
+	p += 2;
+	len -= 2;
+	if (len < 4 * (size_t)count)
+		return malformed;
+	for (i = 0; i < count; i++, p += 4)
+		ccmp |= get_unaligned_be32(p) == WLAN_CIPHER_SUITE_CCMP;
+	len -= 4 * (size_t)count;
+	if (!ccmp)
+		return "it offers no CCMP (AES) pairwise cipher";
+	if (len < 2)
+		return malformed;
+	count = get_unaligned_le16(p);
+	p += 2;
+	len -= 2;
+	if (len < 4 * (size_t)count)
+		return malformed;
+	for (i = 0; i < count; i++, p += 4) {
+		psk |= get_unaligned_be32(p) == WLAN_AKM_SUITE_PSK;
+		sae |= get_unaligned_be32(p) == WLAN_AKM_SUITE_SAE;
+	}
+	len -= 4 * (size_t)count;
+	if (!psk)
+		return sae ? "it is WPA3-only (SAE), which SlateOS cannot join yet" :
+			     "it offers no pre-shared key (PSK) authentication";
+	if (len >= 2 && (get_unaligned_le16(p) & LX_WIFI_RSN_CAP_MFPR))
+		return "it requires management frame protection, which SlateOS cannot give yet";
+	return NULL;
+}
+
+/*
+ * lx_wifi_network_parse() and lx_wifi_rsn_why() at their edges, for the
+ * "hwsim" run to check before anything relies on them: 0, or -EINVAL, every
+ * wrong answer said.
+ */
+static int lx_wifi_join_check(void)
+{
+	static const struct {
+		const char *text;
+		bool good;
+	} files[] = {
+		{ "ssid=home\npsk=12345678\n", true },
+		{ "\r\nssid=home\r\npsk=12345678\r\n\r\n", true },
+		{ "psk=a b%c+d!\nssid=x", true },
+		{ "ssid=home\n", false },
+		{ "psk=12345678\n", false },
+		{ "ssid=home\npsk=1234567\n", false },
+		{ "ssid=home\npsk=1234567890123456789012345678901234567890123456789012345678901234\n", false },
+		{ "ssid=home\npsk=1234567\t8\n", false },
+		{ "ssid=123456789012345678901234567890123\npsk=12345678\n", false },
+		{ "ssid=a\nssid=b\npsk=12345678\n", false },
+		{ "ssid=home\npsk=12345678\nhidden=1\n", false },
+		{ "ssid=\npsk=12345678\n", false },
+	};
+	/* WPA2-PSK, CCMP: the station's own element. */
+	static const u8 wpa2[] = { WLAN_EID_RSN, 20, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+				   0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
+				   0x00, 0x0f, 0xac, 0x02, 0x00, 0x00 };
+	/* WPA2/WPA3 transition: PSK and SAE, management frame protection capable. */
+	static const u8 mixed[] = { WLAN_EID_RSN, 24, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+				    0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x02, 0x00,
+				    0x00, 0x0f, 0xac, 0x02, 0x00, 0x0f, 0xac, 0x08,
+				    0x80, 0x00 };
+	/* WPA3-only: SAE, protection required. */
+	static const u8 wpa3[] = { WLAN_EID_RSN, 20, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+				   0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
+				   0x00, 0x0f, 0xac, 0x08, 0xc0, 0x00 };
+	/* PSK, protection required. */
+	static const u8 mfpr[] = { WLAN_EID_RSN, 20, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+				   0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
+				   0x00, 0x0f, 0xac, 0x02, 0xc0, 0x00 };
+	/* WPA/WPA2 mixed: a TKIP group cipher. */
+	static const u8 tkip[] = { WLAN_EID_RSN, 20, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02,
+				   0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
+				   0x00, 0x0f, 0xac, 0x02, 0x00, 0x00 };
+	/* Its pairwise count past its end. */
+	static const u8 short_ie[] = { WLAN_EID_RSN, 8, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+				       0x02, 0x00 };
+	static const struct {
+		const u8 *ie;
+		bool good;
+	} rsns[] = {
+		{ wpa2, true }, { mixed, true }, { wpa3, false }, { mfpr, false },
+		{ tkip, false }, { short_ie, false }, { NULL, false },
+	};
+	struct lx_wifi_network n;
+	int wrong = 0;
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(files); i++) {
+		const char *why;
+
+		memset(&n, 0, sizeof(n));
+		why = lx_wifi_network_parse(files[i].text, strlen(files[i].text), &n);
+		if (!why != files[i].good) {
+			pr_err("lx-wifi: network file %zu read %s\n", i,
+			       why ? "as refused" : "as good");
+			wrong++;
+		}
+	}
+	memset(&n, 0, sizeof(n));
+	if (lx_wifi_network_parse(files[2].text, strlen(files[2].text), &n) || n.ssid_len != 1 ||
+	    n.ssid[0] != 'x' || strcmp(n.psk, "a b%c+d!")) {
+		pr_err("lx-wifi: a network file's name or passphrase read wrong\n");
+		wrong++;
+	}
+	for (i = 0; i < ARRAY_SIZE(rsns); i++) {
+		if (!lx_wifi_rsn_why(rsns[i].ie) != rsns[i].good) {
+			pr_err("lx-wifi: RSN element %zu judged %s\n", i,
+			       rsns[i].good ? "unjoinable" : "joinable");
+			wrong++;
+		}
+	}
+	if (wrong)
+		return -EINVAL;
+	pr_info("lx-wifi: network files read, and access points' RSN elements judged, as they should be\n");
+	return 0;
+}
+
+/* An access point that answers to the network's name, as the scan heard it. */
+struct lx_wifi_candidate {
+	u8 bssid[ETH_ALEN];
+	u32 freq;
+	int dbm;
+};
+
+/*
+ * What the scan heard of the network: the access points that answer to its
+ * name, how many, the joinable ones strongest first -- the first
+ * LX_WIFI_CANDIDATES -- and of the others, the strongest's reason.
+ */
+struct lx_wifi_choice {
+	const struct lx_wifi_network *n;
+	struct lx_wifi_candidate c[LX_WIFI_CANDIDATES];
+	unsigned int heard;
+	unsigned int joinable;
+	const char *why;
+	int why_dbm;
+};
+
+static void lx_wifi_choose(struct wiphy *wiphy, struct cfg80211_bss *bss, void *data)
+{
+	struct lx_wifi_choice *ch = data;
+	const u8 *ssid;
+	const char *why;
+	int dbm = bss->signal / 100;
+	unsigned int at, kept;
+
+	rcu_read_lock();
+	ssid = ieee80211_bss_get_ie(bss, WLAN_EID_SSID);
+	if (!ssid || ssid[1] != ch->n->ssid_len || memcmp(ssid + 2, ch->n->ssid, ssid[1])) {
+		rcu_read_unlock();
+		return;
+	}
+	why = lx_wifi_rsn_why(ieee80211_bss_get_ie(bss, WLAN_EID_RSN));
+	rcu_read_unlock();
+	ch->heard++;
+	if (why) {
+		if (!ch->why || dbm > ch->why_dbm) {
+			ch->why = why;
+			ch->why_dbm = dbm;
+		}
+		return;
+	}
+	kept = min_t(unsigned int, ch->joinable, LX_WIFI_CANDIDATES);
+	ch->joinable++;
+	for (at = 0; at < kept && ch->c[at].dbm >= dbm; at++)
+		;
+	if (at == LX_WIFI_CANDIDATES)
+		return;
+	memmove(&ch->c[at + 1], &ch->c[at],
+		(min_t(unsigned int, kept, LX_WIFI_CANDIDATES - 1) - at) * sizeof(ch->c[0]));
+	ether_addr_copy(ch->c[at].bssid, bss->bssid);
+	ch->c[at].freq = bss->channel->center_freq;
+	ch->c[at].dbm = dbm;
+}
+
+/*
+ * The next message nl80211's "mlme" group sends saying how `dev`'s
+ * connection ended, read into `c`, within LX_WIFI_JOIN_S: 0, or -ETIMEDOUT
+ * for none.
+ */
+static int lx_wifi_connect_end(const struct genl_family *nl80211, struct net_device *dev,
+			       struct lx_wifi_connected *c)
+{
+	unsigned long until = jiffies + LX_WIFI_JOIN_S * HZ;
+	struct sk_buff *msg;
+	bool ended = false;
+
+	while (!ended &&
+	       (msg = lx_genl_event(nl80211, NL80211_MULTICAST_GROUP_MLME, lx_wifi_left(until)))) {
+		ended = lx_wifi_connect_result(msg, dev, c);
+		nlmsg_free(msg);
+	}
+	return ended ? 0 : -ETIMEDOUT;
+}
+
+/*
+ * The four-way handshake with the access point `dev` has just joined, as
+ * its station, from `pmk`: its frames, which `eapol` has been taking since
+ * before the join, handled (lx_wifi_supplicant) until its keys are in and
+ * its port is open, within LX_WIFI_HANDSHAKE_S. 0, or why not, said.
+ */
+static int lx_wifi_station_handshake(const struct genl_family *nl80211, struct net_device *dev,
+				     struct lx_wifi_eapol *eapol, wait_queue_head_t *wq,
+				     const u8 pmk[LX_WPA_PMK_LEN])
+{
+	struct lx_wifi_handshaking *h = kzalloc(sizeof(*h), GFP_KERNEL);
+	unsigned long until = jiffies + LX_WIFI_HANDSHAKE_S * HZ;
+	struct sk_buff *skb;
+	int err;
+
+	if (!h)
+		return -ENOMEM;
+	h->nl80211 = nl80211;
+	h->sta_dev = dev;
+	memcpy(h->supplicant.pmk, pmk, LX_WPA_PMK_LEN);
+	err = lx_wifi_joined(dev, &h->supplicant);
+	while (!err && !h->supplicant.done) {
+		if (!wait_event_timeout(*wq, !skb_queue_empty(&eapol->frames),
+					lx_wifi_left(until))) {
+			netdev_err(dev, "the handshake did not end in %d s: %s\n",
+				   LX_WIFI_HANDSHAKE_S,
+				   h->supplicant.frames ?
+					   "the access point never sent its third message -- a passphrase that is not the network's is the usual reason" :
+					   "the access point never sent its first message");
+			err = -ETIMEDOUT;
+			break;
+		}
+		while (!err && (skb = skb_dequeue(&eapol->frames))) {
+			err = lx_wifi_supplicant(h, skb);
+			kfree_skb(skb);
+		}
+	}
+	kfree_sensitive(h);
+	return err;
+}
+
+/*
+ * The network `n` joined on `dev`, which is up and has scanned, at the
+ * access point `c` -- protected from the first frame: the handshake's
+ * frames taken from before the connection is asked for, since the access
+ * point sends its first message as soon as it has associated the station.
+ * 0, or why not, said: a refused connection -EAGAIN, for the next access
+ * point to be tried.
+ */
+static int lx_wifi_join_at(const struct genl_family *nl80211, struct net_device *dev,
+			   const struct lx_wifi_network *n, const struct lx_wifi_candidate *c,
+			   const u8 pmk[LX_WPA_PMK_LEN])
+{
+	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
+	struct lx_wifi_eapol eapol = {
+		.type = { .type = htons(ETH_P_PAE), .dev = dev, .func = lx_wifi_eapol_rx },
+		.wq = &wq,
+	};
+	const struct lx_wifi_connect connect = {
+		.ssid = n->ssid,
+		.ssid_len = n->ssid_len,
+		.bssid = c->bssid,
+		.freq = c->freq,
+		.wpa2 = true,
+	};
+	struct lx_wifi_connected done = {};
+	int err;
+
+	skb_queue_head_init(&eapol.frames);
+	dev_add_pack(&eapol.type);
+	netdev_info(dev, "joining %pM on %u MHz, %d dBm\n", c->bssid, c->freq, c->dbm);
+	/* Until the station is associated, a failure leaves the next access point to try. */
+	err = lx_wifi_ask(nl80211, NL80211_CMD_CONNECT, dev, lx_wifi_connect_params, &connect,
+			  "connect") ? -EAGAIN : 0;
+	if (!err && lx_wifi_connect_end(nl80211, dev, &done)) {
+		static const u16 leaving = WLAN_REASON_DEAUTH_LEAVING;
+
+		netdev_err(dev, "nl80211 never said how joining %pM ended, in %d s\n", c->bssid,
+			   LX_WIFI_JOIN_S);
+		/* Whatever it reached, left, for the next to be asked. */
+		lx_wifi_ask(nl80211, NL80211_CMD_DISCONNECT, dev, lx_wifi_reason, &leaving,
+			    "give the join up");
+		err = -EAGAIN;
+	}
+	if (!err && done.status != WLAN_STATUS_SUCCESS) {
+		netdev_err(dev, "%pM refused it: status %d%s%s\n", c->bssid, done.status,
+			   done.timed_out ? ", timed out in " : "",
+			   done.timed_out ? lx_wifi_timeout_step(done.timeout_reason) : "");
+		err = -EAGAIN;
+	}
+	if (!err)
+		err = lx_wifi_station_handshake(nl80211, dev, &eapol, &wq, pmk);
+	dev_remove_pack(&eapol.type);
+	skb_queue_purge(&eapol.frames);
+	if (!err && !lx_wifi_oper_up(dev)) {
+		netdev_err(dev, "joined, but the network core did not bring its link up in %d ms\n",
+			   LX_WIFI_FRAME_MS);
+		err = -ENOLINK;
+	}
+	if (!err)
+		netdev_info(dev, "joined \"%*pE\" (WPA2-PSK, CCMP) at %pM on %u MHz, %d dBm: its keys installed, its port open\n",
+			    (int)n->ssid_len, n->ssid, c->bssid, c->freq, c->dbm);
+	return err;
+}
+
+/*
+ * The network the file at `path` names (lx_wifi_network_parse) joined on
+ * the card's interface: scanned for, and its joinable access points tried,
+ * strongest first, until one takes the station. 0, or why not, said --
+ * never the passphrase.
+ */
+static int lx_wifi_join_network(const char *path)
+{
+	const struct genl_family *nl80211 = lx_wifi_nl80211();
+	struct lx_wifi_network *n = kzalloc(sizeof(*n), GFP_KERNEL);
+	struct lx_wifi_choice *ch = kzalloc(sizeof(*ch), GFP_KERNEL);
+	u8 pmk[LX_WPA_PMK_LEN];
+	struct net_device *dev = NULL;
+	const char *why;
+	void *buf = NULL;
+	size_t size = 0;
+	ssize_t got;
+	unsigned int i;
+	int err;
+
+	if (!nl80211 || !n || !ch) {
+		kfree(n);
+		kfree(ch);
+		return nl80211 ? -ENOMEM : -ENODEV;
+	}
+	got = kernel_read_file_from_path_initns(path, 0, &buf, LX_WIFI_NETWORK_MAX, &size,
+						READING_UNKNOWN);
+	if (got < 0) {
+		pr_err("lx-wifi: join: the network file %s could not be read: %zd\n", path, got);
+		err = got;
+		goto out;
+	}
+	why = lx_wifi_network_parse(buf, got, n);
+	memzero_explicit(buf, got);
+	vfree(buf);
+	if (why) {
+		pr_err("lx-wifi: join: the network file %s is not one: %s\n", path, why);
+		err = -EINVAL;
+		goto out;
+	}
+	/* The PMK first: the handshake's first message comes the moment the station is associated. */
+	lx_wpa_pmk(n->psk, n->ssid, n->ssid_len, pmk);
+	memzero_explicit(n->psk, sizeof(n->psk));
+	err = lx_wifi_devs(&dev, 1) ? 0 : -ENODEV;
+	if (!err)
+		err = lx_wifi_open(dev);
+	if (!err)
+		err = lx_genl_listen(nl80211, NL80211_MULTICAST_GROUP_MLME);
+	if (!err)
+		err = lx_wifi_scan_on(nl80211, dev);
+	if (err)
+		goto out;
+	ch->n = n;
+	cfg80211_bss_iter(dev->ieee80211_ptr->wiphy, NULL, lx_wifi_choose, ch);
+	if (!ch->joinable) {
+		if (ch->heard)
+			pr_err("lx-wifi: join: \"%*pE\" was heard from %u access point(s), none of which SlateOS can join: the strongest's %s\n",
+			       (int)n->ssid_len, n->ssid, ch->heard, ch->why);
+		else
+			pr_err("lx-wifi: join: no access point answered to \"%*pE\"\n",
+			       (int)n->ssid_len, n->ssid);
+		err = -ENOENT;
+		goto out;
+	}
+	pr_info("lx-wifi: join: \"%*pE\" heard from %u access point(s), %u of them joinable\n",
+		(int)n->ssid_len, n->ssid, ch->heard, ch->joinable);
+	err = -EAGAIN;
+	for (i = 0; err == -EAGAIN && i < min_t(unsigned int, ch->joinable, LX_WIFI_CANDIDATES);
+	     i++)
+		err = lx_wifi_join_at(nl80211, dev, n, &ch->c[i], pmk);
+out:
+	memzero_explicit(pmk, sizeof(pmk));
+	if (dev)
+		lx_wifi_put(&dev, 1);
+	kfree_sensitive(n);
+	kfree(ch);
+	return err;
+}
+
+/* How the join ended, for the network task to wait on (lx_nic_await_link_layer). */
+static DECLARE_COMPLETION(lx_wifi_join_done);
+static int lx_wifi_join_err = -ENODEV;
+
+/*
+ * The network task's wait before it serves the card (lx_nic.c): with
+ * "join=", until the network is joined -- its link-layer frames, the
+ * handshake's, this task's until then -- and how that ended; else at once.
+ */
+int lx_nic_await_link_layer(void)
+{
+	if (!lx_arg("join="))
+		return 0;
+	wait_for_completion(&lx_wifi_join_done);
+	return lx_wifi_join_err;
+}
+
 static int lx_wifi_hwsim(void)
 {
 	const struct genl_family *nl80211 = lx_wifi_nl80211();
@@ -1749,6 +2274,8 @@ static int lx_wifi_hwsim(void)
 		err = lx_wifi_ccm_check();
 	if (!err)
 		err = lx_wpa_check();
+	if (!err)
+		err = lx_wifi_join_check();
 	if (!err)
 		err = lx_wifi_ask(nl80211, NL80211_CMD_SET_INTERFACE, devs[0], lx_wifi_ap_type, NULL,
 				  "make the first radio an access point");
@@ -1812,6 +2339,14 @@ static int lx_wifi_task(void *unused)
 		lx_end_run("lx-wifi", lx_wifi_scan());
 	if (lx_arg("hwsim"))
 		lx_end_run("lx-wifi", lx_wifi_hwsim());
+	if (lx_arg("join=")) {
+		lx_wifi_join_err = lx_wifi_join_network(lx_arg("join="));
+		complete_all(&lx_wifi_join_done);
+		/* Joined and served: the network task ends the run, when its stacks have gone. */
+		if (lx_wifi_join_err || !lx_arg("serve="))
+			lx_end_run("lx-wifi", lx_wifi_join_err);
+		return 0;
+	}
 	if (lx_arg("pci="))
 		return 0;
 	/*

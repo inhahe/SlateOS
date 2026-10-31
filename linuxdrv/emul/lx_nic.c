@@ -343,6 +343,13 @@ static rx_handler_result_t lx_nic_port_rx(struct sk_buff **pskb)
 	void *slot;
 	long room;
 
+	/*
+	 * 802.1X's frames are the link layer's own -- a WiFi network's key
+	 * handshakes -- not the stack's: passed on to whatever in the process
+	 * takes them, dropped by the core when nothing does.
+	 */
+	if (skb->protocol == htons(ETH_P_PAE))
+		return RX_HANDLER_PASS;
 	skb_push(skb, skb->data - skb_mac_header(skb));
 	if (skb_vlan_tag_present(skb)) {
 		/* Frees the frame when it cannot. */
@@ -474,9 +481,21 @@ static long lx_nic_stacks(void)
 }
 
 /*
+ * Whether the device may be served yet: a WiFi driver process's network is
+ * joined first, the handshake's frames its own until then (lx_wifi.c, which
+ * overrides this); 0 once it may be, else why it may not. Every other
+ * driver's at once.
+ */
+int __weak lx_nic_await_link_layer(void)
+{
+	return 0;
+}
+
+/*
  * With "serve=<name>": the first device the driver registered opened, taken
  * what it receives, and served, until -- with "stacks=<n>" -- the process
- * ends. Without, the devices are left as the driver's probe left them.
+ * ends; once its link layer allows (lx_nic_await_link_layer). Without, the
+ * devices are left as the driver's probe left them.
  */
 static int lx_nic_task(void *unused)
 {
@@ -491,6 +510,9 @@ static int lx_nic_task(void *unused)
 		pr_err("lx-nic: stacks= takes a number above 0\n");
 		slx_exit(SLX_EXIT_INIT_FAILED);
 	}
+	/* A link layer that never came up ends the run where it failed, not here. */
+	if (lx_nic_await_link_layer())
+		return 0;
 	rtnl_lock();
 	for_each_netdev(&init_net, dev) {
 		if (!(dev->flags & IFF_LOOPBACK)) {

@@ -1482,6 +1482,19 @@ extern "C" fn kernel_main() -> ! {
                     e
                 ),
             }
+            // And its WiFi network file, which only a joining WiFi driver
+            // process may read; never what it holds.
+            match linuxdrv::mount_boot_wifi() {
+                Ok(false) => {}
+                Ok(true) => serial_println!(
+                    "[boot] A WiFi network file from the boot medium, at {} (read-only)",
+                    linuxdrv::BOOT_WIFI_DIR
+                ),
+                Err(e) => serial_println!(
+                    "[boot] WARNING: the boot medium's WiFi network file was not placed: {:?}",
+                    e
+                ),
+            }
 
             // Probe secondary block devices for ext4 filesystems.
             // Try common virtio-blk device names.  The first ext4 partition

@@ -5564,11 +5564,19 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         network made WPA2-PSK and joined again, the four-way handshake made
         by the layer as both sides (`emul/lx_wpa.c`), and frames crossing
         encrypted by mac80211's CCMP over Linux's crypto API, protected on
-        the air. Next: its scan on the RZ717 (`linuxdrv.wifi=06:00.0`,
-        through `scripts/pikvm.py`; the PiKVM fell off the network mid-run
-        on 2026-10-30), then the card joining a real WPA2 network -- which
-        needs the network and its passphrase from the operator, and a way
-        to give the process a passphrase that keeps it off the command line
+        the air. And on the RZ717 itself, 2026-10-31: the card scans
+        (`linuxdrv.wifi=06:00.0`, through `scripts/pikvm.py`) and joins the
+        operator's home network (A-Q31, §1596) -- its name and passphrase in
+        a file outside git that `pikvm.py stage --wifi` puts on the boot
+        medium, the kernel seals at `/.boot-wifi`, and only the joining
+        driver process may read -- the layer making the four-way handshake
+        as the station against the real access point, then serving the card
+        as `nic.wifi`: the netstack daemon took an address by DHCP over it,
+        had 400 pings answered by the gateway, and resolved example.com
+        through it. Next: serving a WiFi card for the system's life
+        (`linuxdrv.serve=mt7925e@...`), which needs its rekeys answered and
+        a lost link joined again (known-issues
+        A-WIFI-REKEYS-AND-LOST-LINKS-ARE-NOT-ANSWERED)
   - [ ] Then the test PC's Intel UHD 630 (`i915`), with `[F]` for the bridge
         from Linux's DRM/KMS onto the graphics stack -- this is how the i915
         item in 3.1 gets done

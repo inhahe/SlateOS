@@ -99,6 +99,9 @@ struct sk_buff *lx_genl_request(const struct genl_family *family, u8 cmd);
 int lx_genl_doit(const struct genl_family *family, struct sk_buff *req,
 		 struct sk_buff_head *replies);
 int lx_genl_listen(const struct genl_family *family, const char *name);
+/* lx_netlink.c: the group `name` no longer listened to, what it kept dropped:
+ * its messages freed as they come, rather than kept for a reader gone. */
+void lx_genl_unlisten(const struct genl_family *family, const char *name);
 struct sk_buff *lx_genl_event(const struct genl_family *family, const char *name,
 			      unsigned long timeout);
 struct sk_buff *lx_genl_unicast(void);
@@ -177,12 +180,20 @@ void lx_wpa_ptk(const u8 pmk[LX_WPA_PMK_LEN], const u8 *aa, const u8 *spa, const
 int lx_wpa_wrap(const u8 kek[LX_WPA_KEK_LEN], const u8 *plain, size_t len, u8 *out);
 int lx_wpa_unwrap(const u8 kek[LX_WPA_KEK_LEN], const u8 *wrapped, size_t len, u8 *out);
 /*
- * An EAPOL-Key frame built in the `room` bytes at `buf`: its Key
- * Information `info`, replay counter `replay`, nonce (NULL for none) and
- * the `data_len` bytes of key data at `data` -- signed by `kck` when it is
- * not NULL. Its length, or -ENOSPC.
+ * The 802.1X protocol version an EAPOL-Key frame carries: an access point's
+ * 2, as hostapd sends; a station's 1, as wpa_supplicant sends by default,
+ * since some access points drop a station's frames of version 2 unanswered.
  */
-int lx_wpa_key_frame(u8 *buf, size_t room, u16 info, u64 replay, const u8 *nonce,
+#define LX_WPA_EAPOL_AP 2
+#define LX_WPA_EAPOL_STATION 1
+
+/*
+ * An EAPOL-Key frame built in the `room` bytes at `buf`: 802.1X version
+ * `version`, its Key Information `info`, replay counter `replay`, nonce
+ * (NULL for none) and the `data_len` bytes of key data at `data` -- signed
+ * by `kck` when it is not NULL. Its length, or -ENOSPC.
+ */
+int lx_wpa_key_frame(u8 *buf, size_t room, u8 version, u16 info, u64 replay, const u8 *nonce,
 		     const u8 *data, size_t data_len, const u8 *kck);
 /*
  * The `len` bytes at `buf` read as an EAPOL-Key frame -- its MIC checked by
@@ -233,8 +244,9 @@ unsigned long lx_live_kthreads(void);
 /*
  * lx_emul.c: a run of the layer's own task ended, `err` its outcome and
  * `who` its task's name for the log -- the process ended with it: a failure,
- * its error said, as a failed initcall; a success in which Linux code warned anywhere in the
- * process, as warned (SLX_EXIT_WARNED), a bug the run must not pass; else 0.
+ * its error said, as a failed run (SLX_EXIT_RUN_FAILED); a success in which
+ * Linux code warned anywhere in the process, as warned (SLX_EXIT_WARNED), a
+ * bug the run must not pass; else 0.
  */
 void lx_end_run(const char *who, int err) __attribute__((noreturn));
 

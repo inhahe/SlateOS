@@ -198,7 +198,29 @@ it (`CONNECT`), the layer answering its authentication and association on
 the first as hostapd would, and a frame crossing the network each way; then
 the network made WPA2-PSK, joined again, the four-way handshake made by
 the layer as both sides (`emul/lx_wpa.c`), and a frame crossing each way
-encrypted -- the air watched through hwsim's monitor interface throughout.
+encrypted -- the air watched through hwsim's monitor interface throughout;
+and, the handshake made, the station kept for its association as a real
+join keeps it, its keeper answering message 3 sent again and a renewed group
+key.
+
+With "join=<path>", the layer joins a real WPA2 network (design-decisions
+1596): the file at `<path>` names it -- an `ssid=` line and a `psk=` line,
+staged on the boot medium as the module `wifi/network` by `scripts/pikvm.py
+stage --wifi` -- which the kernel places on a sealed memfs at `/.boot-wifi`,
+gives a tree over only to the joining process, and unmounts before init so
+that no process after can read it. The process scans for the network by
+name, judges each access point's RSN element (WPA2-PSK with CCMP; WPA3-only,
+TKIP or required management frame protection refused), connects to the
+strongest it can join, the next if one refuses, and makes the four-way
+handshake as the station; the station is then kept (`lx_wifi_keep`),
+answering the access point's key management for the life of the
+association -- a lost message 4, a pairwise rekey, the group key's renewal.
+With "serve=" as well, the joined interface is served to the network stack
+once the join is done (`lx_nic_await_link_layer`). On the test PC the
+kernel's self-test joins the operator's network this way and has the
+netstack daemon take an address over it, ping its gateway and resolve a
+name. A dropped connection is not joined again yet (known-issues
+A-WIFI-REKEYS-AND-LOST-LINKS-ARE-NOT-ANSWERED).
 
 ## Licences
 

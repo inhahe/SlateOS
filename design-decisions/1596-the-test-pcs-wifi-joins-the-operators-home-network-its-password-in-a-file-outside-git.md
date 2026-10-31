@@ -26,6 +26,15 @@ printed in a log.
    credential was found and which network was joined, never the
    passphrase. A copy of the operator's answer in `operator-answers/`
    leaves both out.
+4. **No process but the joining driver ever reads it** (added after the
+   review of the join, which found the file readable by any holder of the
+   `File` capability). The join runs in the kernel's own self-tests, before
+   init; the kernel unmounts `/.boot-wifi` before init starts
+   (`linuxdrv::drop_boot_wifi`), so that no process after can read it --
+   root's included, by any path, bind mount or syscall. Before that, only
+   the kernel's own processes run. A driver started for the system's life
+   that must join again later will need the PMK kept for it (known-issues
+   A-WIFI-REKEYS-AND-LOST-LINKS-ARE-NOT-ANSWERED).
 
 ### Alternatives
 
@@ -42,5 +51,5 @@ run: the one kept on the PiKVM (`slateos-pikvm.img`, replaced by each
 upload) and the staged copy on the operator's PC under the worktree's
 `build/`, which git ignores -- readable by anyone with either, the cost
 option A states. Neither of the test PC's disks holds it: the kernel keeps
-it in memory, on the sealed filesystem it places it on, and writes it
-nowhere.
+it in memory, on the sealed filesystem it places it on, until it drops it
+before init, and writes it nowhere.

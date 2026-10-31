@@ -76,8 +76,12 @@ HELLO_BOOT_FW_FILE = Path("linuxdrv") / "hello" / "hello.fw"
 #: The name the image is kept under on the PiKVM.
 IMAGE_NAME = "slateos-pikvm.img"
 #: The WiFi network file's path on the ESP, and its module's name: the
-#: kernel places it under /.boot-wifi (linuxdrv::mount_boot_wifi).
+#: kernel places it under /.boot-wifi (linuxdrv::mount_boot_wifi; its
+#: WIFI_MODULE and WIFI_NETWORK, which the self-test holds to this).
 WIFI_NETWORK = "wifi/network"
+#: The most a network file may hold: the driver reads no further
+#: (lx_wifi.c's LX_WIFI_NETWORK_MAX).
+WIFI_NETWORK_MAX = 512
 
 
 def network_file_problem(data: bytes) -> str | None:
@@ -87,6 +91,8 @@ def network_file_problem(data: bytes) -> str | None:
     `ssid=<name>` -- 1 to 32 bytes -- or `psk=<passphrase>` -- 8 to 63
     printable ASCII characters -- each once. None when nothing is. Never
     quotes what it holds: the passphrase is in it."""
+    if len(data) > WIFI_NETWORK_MAX:
+        return f"it is longer than {WIFI_NETWORK_MAX} bytes"
     named = keyed = False
     for line in data.split(b"\n"):
         if line.endswith(b"\r"):
@@ -487,6 +493,12 @@ def stage(worktree: Path, out: Path, cmdline: str, linuxdrv: bool = True,
     if wifi is not None:
         if not linuxdrv:
             sys.exit("pikvm: --wifi is for the WiFi driver process, and --no-linuxdrv leaves it off")
+        # Without a card named, no join runs and the image would carry the
+        # passphrase for nothing.
+        if "linuxdrv.wifi=" not in cmdline:
+            sys.exit("pikvm: --wifi is joined by the card linuxdrv.wifi= names, and the command "
+                     "line names none (add it with --add-cmdline)")
+        wifi = wifi.expanduser()
         try:
             network = wifi.read_bytes()
         except OSError as e:
@@ -846,6 +858,9 @@ def self_test() -> int:
          "it has a line that is neither ssid=<name> nor psk=<passphrase>"),
         ("another line", b"ssid=h\npsk=12345678\nhidden=1\n",
          "it has a line that is neither ssid=<name> nor psk=<passphrase>"),
+        ("good lines past 512 bytes", b"ssid=h\npsk=12345678\n" + b"\n" * 500,
+         "it is longer than 512 bytes"),
+        ("good lines of exactly 512 bytes", b"ssid=h\npsk=12345678\n" + b"\n" * 492, None),
     ]:
         check(f"WiFi network file: {label}", network_file_problem(data), want)
     lx_wifi = (HERE.parent / "linuxdrv" / "emul" / "lx_wifi.c").read_text(encoding="utf-8")
@@ -855,7 +870,24 @@ def self_test() -> int:
               "it has two psk= lines", "its ssid= is longer than 32 bytes",
               "its psk= is not 8 to 63 characters long",
               "its psk= holds a character that is not printable ASCII",
-              "it has a line that is neither ssid=<name> nor psk=<passphrase>")), True)
+              "it has a line that is neither ssid=<name> nor psk=<passphrase>",
+              f"it is longer than {WIFI_NETWORK_MAX} bytes")), True)
+    check("WiFi network file: its most is the driver's",
+          f"#define LX_WIFI_NETWORK_MAX {WIFI_NETWORK_MAX}" in lx_wifi, True)
+    linuxdrv_rs = (HERE.parent / "kernel" / "src" / "linuxdrv.rs").read_text(encoding="utf-8")
+    prefix, name = WIFI_NETWORK.split("/")
+    check("WiFi network file: its module's name is the kernel's prefix and file name",
+          (f'const WIFI_MODULE: &[u8] = b"{prefix}/";' in linuxdrv_rs,
+           f'const WIFI_NETWORK: &str = "{name}";' in linuxdrv_rs), (True, True))
+    for label, cmdline, flags in [
+        ("without a card named, --wifi is refused", "a=1", {}),
+        ("with --no-linuxdrv, --wifi is refused", "a=1 linuxdrv.wifi=06:00.0", {"linuxdrv": False}),
+    ]:
+        try:
+            stage(HERE.parent, Path("nonesuch.img"), cmdline, wifi=Path("nonesuch"), **flags)
+            check(f"stage: {label}", "staged", "refused")
+        except SystemExit as e:
+            check(f"stage: {label}", "--wifi" in str(e), True)
     try:
         limine_conf("timeout: 3\n", "x")
         check("limine.conf without an entry is refused", "taken", "refused")

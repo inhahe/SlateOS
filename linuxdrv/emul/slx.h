@@ -192,6 +192,7 @@ void slx_stop(const char *what, const void *caller) __attribute__((noreturn));
  * the kernel can tell them apart (kernel/src/linuxdrv.rs, lxkit::exit).
  */
 #define SLX_EXIT_OK 0
+#define SLX_EXIT_RUN_FAILED 117		/* the layer's own task's run failed (lx_end_run) */
 #define SLX_EXIT_ARGUMENT 118		/* a module parameter unknown or refused (lx_emul.c) */
 #define SLX_EXIT_WARNED 119		/* a run that must not, warned (lx_nic.c's serve-once) */
 #define SLX_EXIT_NO_CLOCK 120		/* the system gave no clock */

@@ -9129,6 +9129,10 @@ extern "C" fn kernel_main() -> ! {
                     }
                 }
             }
+            // The WiFi network file's last reader -- the driver processes the
+            // kernel starts -- has run: dropped before any other process
+            // can, root's included (design-decisions 1596).
+            linuxdrv::drop_boot_wifi();
 
             // Arm the container healthcheck supervisor. Deferred to here — after every
             // timer self-test (the hrtimer self-test asserts an exact `pending_count`,

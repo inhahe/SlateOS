@@ -217,7 +217,7 @@ static void lx_wpa_mic(const u8 kck[LX_WPA_KCK_LEN], const u8 *frame, size_t len
 	memzero_explicit(digest, sizeof(digest));
 }
 
-int lx_wpa_key_frame(u8 *buf, size_t room, u16 info, u64 replay, const u8 *nonce,
+int lx_wpa_key_frame(u8 *buf, size_t room, u8 version, u16 info, u64 replay, const u8 *nonce,
 		     const u8 *data, size_t data_len, const u8 *kck)
 {
 	struct lx_wpa_eapol_key *k = (struct lx_wpa_eapol_key *)buf;
@@ -226,7 +226,7 @@ int lx_wpa_key_frame(u8 *buf, size_t room, u16 info, u64 replay, const u8 *nonce
 	if (len > room || data_len > U16_MAX)
 		return -ENOSPC;
 	memset(buf, 0, LX_WPA_KEY_HDR);
-	k->version = 2;
+	k->version = version;
 	k->type = 3;
 	k->length = cpu_to_be16(len - 4);
 	k->descriptor = 2;
@@ -438,7 +438,8 @@ int lx_wpa_check(void)
 		ok = false;
 	}
 	/* A frame's MIC holds for the frame, and not for it with a byte changed. */
-	len = lx_wpa_key_frame(frame, sizeof(frame), LX_WPA_INFO_VERSION | LX_WPA_INFO_PAIRWISE |
+	len = lx_wpa_key_frame(frame, sizeof(frame), LX_WPA_EAPOL_STATION,
+			       LX_WPA_INFO_VERSION | LX_WPA_INFO_PAIRWISE |
 			       LX_WPA_INFO_MIC, 1, snonce, key, 8, ptk.kck);
 	if (len < 0 || !lx_wpa_key_parse(frame, len, ptk.kck)) {
 		pr_err("lx-wpa: check failed: a frame's own MIC did not hold\n");

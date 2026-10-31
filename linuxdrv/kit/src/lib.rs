@@ -46,6 +46,9 @@ mod wait;
 pub mod exit {
     /// Every initcall returned 0.
     pub const OK: i32 = 0;
+    /// The layer's own task's run -- a scan, a join, serving a card --
+    /// failed, its log saying how (`lx_end_run`).
+    pub const RUN_FAILED: i32 = 117;
     /// An argument named a Linux module parameter that does not exist,
     /// gave one a value its kind refuses, or held both a space and a quote
     /// (`lx_emul.c`'s parameters).
@@ -97,6 +100,7 @@ mod tests {
             .collect();
         let kit = [
             ("OK", exit::OK),
+            ("RUN_FAILED", exit::RUN_FAILED),
             ("ARGUMENT", exit::ARGUMENT),
             ("WARNED", exit::WARNED),
             ("NO_CLOCK", exit::NO_CLOCK),
@@ -130,5 +134,48 @@ mod tests {
             seen += 1;
         }
         assert!(seen >= 5, "the kernel's exit codes were not found");
+    }
+
+    /// The kernel waits for a joining WiFi driver process to serve its card
+    /// no shorter than the process's own worst case before it does, whose
+    /// end it says itself: its radio's registering and its scan, then each
+    /// access point it tries joined, its handshake made and its link up
+    /// (`emul/lx_wifi.c`'s waits; `kernel/src/linuxdrv.rs`'s `WIFI_JOIN_S`).
+    #[test]
+    fn the_kernel_waits_out_a_joins_worst_case() {
+        let c = read("../emul/lx_wifi.c");
+        let define = |name: &str| -> u64 {
+            for line in c.lines() {
+                let mut words = line.split_whitespace();
+                if words.next() == Some("#define") && words.next() == Some(name) {
+                    return words
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(|| panic!("lx_wifi.c's {name} is no number"));
+                }
+            }
+            panic!("lx_wifi.c defines no {name}")
+        };
+        let worst_ms = define("LX_WIFI_REGISTER_MS")
+            + define("LX_WIFI_SCAN_S") * 1000
+            + define("LX_WIFI_CANDIDATES")
+                * (define("LX_WIFI_JOIN_S") * 1000
+                    + define("LX_WIFI_HANDSHAKE_S") * 1000
+                    + define("LX_WIFI_FRAME_MS"));
+        let kernel = read("../../kernel/src/linuxdrv.rs");
+        let waits_s: u64 = kernel
+            .lines()
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("const WIFI_JOIN_S: u64 = ")?
+                    .trim_end_matches(';')
+                    .parse()
+                    .ok()
+            })
+            .expect("the kernel's WIFI_JOIN_S");
+        assert!(
+            waits_s * 1000 >= worst_ms,
+            "the kernel waits {waits_s} s for a join whose worst case is {worst_ms} ms"
+        );
     }
 }

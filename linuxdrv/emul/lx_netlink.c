@@ -296,6 +296,16 @@ int lx_genl_listen(const struct genl_family *family, const char *name)
 	return -ENOMEM;
 }
 
+void lx_genl_unlisten(const struct genl_family *family, const char *name)
+{
+	struct lx_genl_listen *l = lx_genl_listener(lx_genl_group(family, name));
+
+	if (!l)
+		return;
+	skb_queue_purge(&l->queue);
+	l->group = 0;
+}
+
 struct sk_buff *lx_genl_event(const struct genl_family *family, const char *name,
 			      unsigned long timeout)
 {

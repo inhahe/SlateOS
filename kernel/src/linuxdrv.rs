@@ -41,6 +41,9 @@ const HWSIM: &[u8] = b"linuxdrv/hwsim";
 /// Exit codes a driver process ends with (`SLX_EXIT_*` in
 /// `linuxdrv/emul/slx.h`; `lxkit::exit`).
 const EXIT_OK: i32 = 0;
+/// The layer's own task's run -- a scan, a join, serving a card -- failed,
+/// its log saying how (`lx_end_run`).
+const EXIT_RUN_FAILED: i32 = 117;
 /// An argument naming a module parameter the process does not have,
 /// giving one a value its kind refuses, or holding both a space and a
 /// quote.
@@ -70,6 +73,7 @@ const fn exit_meaning(code: i32) -> Option<&'static str> {
         EXIT_DEADLOCK => Some("its tasks were all waiting for what never comes"),
         EXIT_STOP => Some("it called a function the layer does not have (its log names it)"),
         EXIT_INIT_FAILED => Some("an initcall failed (its log says which)"),
+        EXIT_RUN_FAILED => Some("its run failed (its log says how)"),
         KILLED_ACCESS_VIOLATION => Some("the kernel killed it for touching memory it may not"),
         _ => None,
     }
@@ -547,6 +551,14 @@ fn wifi_runs(
         || None,
     )?;
     if let Some(network) = wifi_reading()? {
+        // The scan's process lets the card go before the join's takes it,
+        // as every run after another on one card waits for.
+        if !crate::devhandle::yield_until(|| crate::pci::bound_driver(a).is_none()) {
+            serial_println!(
+                "[linuxdrv]   FAIL: the card at {arg} was still bound after the scan's process ended"
+            );
+            return Err(KernelError::InternalError);
+        }
         wifi_join_run(elf, &arg, &caps, network)?;
     } else {
         skips.record(
@@ -561,11 +573,11 @@ fn wifi_runs(
 const WIFI_SERVICE: &[u8] = b"nic.wifi";
 
 /// The card's network joined and served (design-decisions 1596): Linux's
-/// mt7925e started with `join=`[`WIFI_NETWORK_FILE`] -- holding the right to
+/// mt7925e started with `join=` the network file ([`WIFI_NETWORK`]) -- holding the right to
 /// read it (`network`, [`wifi_reading`]) beside the card's and its
 /// firmware's (`capabilities`) -- joining the network the file names, then
 /// serving its interface to the network stack as [`WIFI_SERVICE`] within
-/// 90 s, to two stacks in turn, as e1000e on a named card's network serves
+/// its own worst case's time, to two stacks in turn, as e1000e on a named card's network serves
 /// its: the netstack daemon's `nic-check` (`lan`) -- an address by DHCP,
 /// the gateway answering ARP and its pings -- then the daemon serving
 /// sockets over it ([`serve_sockets`]), through which a name must resolve,
@@ -581,13 +593,18 @@ fn wifi_join_run(
     capabilities: &[(ResourceType, u64, Rights)],
     network: (ResourceType, u64, Rights),
 ) -> KernelResult<()> {
-    /// How long firmware, a scan and a join may take before the card is served.
-    const WIFI_JOIN_S: u64 = 90;
+    /// How long firmware, a scan and a join may take before the card is
+    /// served: the driver process's own worst case, which it says the end
+    /// of itself -- its radio's registering and its scan (30 s each), then
+    /// each access point it tries, at most four, joined (20 s), its
+    /// handshake made (10 s) and its link up (2 s): 188 s (`lx_wifi.c`'s
+    /// `LX_WIFI_*`; `lxkit`'s tests hold the two together).
+    const WIFI_JOIN_S: u64 = 200;
     let service = crate::ipc::service::key_id(WIFI_SERVICE);
     let mut caps = alloc::vec::Vec::from(capabilities);
     caps.push(network);
     caps.push((ResourceType::Service, service, Rights::WRITE));
-    let join = alloc::format!("join={WIFI_NETWORK_FILE}");
+    let join = alloc::format!("join={}", wifi_network_file());
     let program = Program {
         elf,
         name: "lx-mt7925e",
@@ -617,32 +634,21 @@ fn wifi_join_run(
         KernelError::InternalError
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(WIFI_JOIN_S * 1_000_000_000);
-    while !crate::ipc::service::is_registered(WIFI_SERVICE) {
-        let alive = pcb::state(driver.pid).is_some_and(|s| s != pcb::ProcessState::Zombie);
-        if !alive {
-            return Err(fail("ended before it served the card", &driver));
-        }
-        if crate::hrtimer::now_ns() >= deadline {
+    match await_registered(WIFI_SERVICE, driver.pid, deadline, 100) {
+        Awaited::Registered => {}
+        Awaited::Ended => return Err(fail("ended before it served the card", &driver)),
+        Awaited::TimedOut => {
             return Err(fail(
                 &alloc::format!("did not serve the card within {WIFI_JOIN_S} s"),
                 &driver,
             ));
         }
-        crate::sched::sleep_ms(100);
     }
-    let stack = Program {
-        elf: spawn::NETSTACK_ELF,
-        name: "netstack-nic",
-        driver: false,
-        limit_s: 90,
-        poll_ms: DAEMON_POLL_MS,
-    };
-    let checked = start(
-        &stack,
+    let checked = run_daemon(
+        90,
         &[b"netstack", b"nic-check", WIFI_SERVICE, check::mode::LAN],
         &[(ResourceType::Service, service, Rights::READ)],
-    )
-    .map(|daemon| finish(&stack, &daemon));
+    );
     if checked != Ok(Some(check::OK)) {
         return Err(fail(
             &alloc::format!(
@@ -892,7 +898,7 @@ fn place_firmware(files: &[FirmwareFile<'_>], at: &str) -> KernelResult<(usize, 
             // the firmware placed only on success (BOOT_FIRMWARE_PLACED).
             if let Err(unmounted) = Vfs::unmount(at) {
                 serial_println!(
-                    "[boot] the firmware's mount at {at} stays, half-placed: its unmount failed: {unmounted:?}"
+                    "[boot] the mount at {at} stays, half-placed: its unmount failed: {unmounted:?}"
                 );
             }
             Err(e)
@@ -900,9 +906,35 @@ fn place_firmware(files: &[FirmwareFile<'_>], at: &str) -> KernelResult<(usize, 
     }
 }
 
+/// The files of the boot medium's modules named `<prefix><path>`, `what`
+/// they are said to be, placed at `<path>` under `dir` on a memfs of its own
+/// sealed read-only ([`place_firmware`]): those placed, path and bytes,
+/// none when there are none.
+///
+/// # Errors
+///
+/// `InvalidArgument`, said, for a module [`module_files`] refuses: nothing
+/// is placed. [`place_firmware`]'s.
+fn mount_boot_files(
+    prefix: &[u8],
+    dir: &str,
+    what: &str,
+) -> KernelResult<alloc::vec::Vec<FirmwareFile<'static>>> {
+    let files = module_files(prefix, crate::boot::modules()).map_err(|refused| {
+        serial_println!(
+            "[boot] {what} module \"{}\": {}; nothing of it placed",
+            refused.name.escape_ascii(),
+            refused.why
+        );
+        KernelError::InvalidArgument
+    })?;
+    place_firmware(&files, dir)?;
+    Ok(files)
+}
+
 /// The boot medium's firmware -- every module limine.conf names
 /// `firmware/<path>` -- placed at `<path>` under [`BOOT_FIRMWARE_DIR`]
-/// ([`place_firmware`]): as an initramfs carries a machine's firmware on
+/// ([`mount_boot_files`]): as an initramfs carries a machine's firmware on
 /// Linux, for the driver processes' loader, on a machine whose root holds
 /// none (the test PC, booted from a medium with only an ESP). Modules the
 /// bootloader loaded that cannot be read whole are said, since one may be
@@ -911,8 +943,7 @@ fn place_firmware(files: &[FirmwareFile<'_>], at: &str) -> KernelResult<(usize, 
 ///
 /// # Errors
 ///
-/// `InvalidArgument`, said, for a firmware module [`module_files`]
-/// refuses: nothing is placed. [`place_firmware`]'s.
+/// [`mount_boot_files`]'.
 pub fn mount_boot_firmware() -> KernelResult<(usize, usize)> {
     let loaded = crate::boot::module_count();
     let read = crate::boot::modules().count();
@@ -922,60 +953,90 @@ pub fn mount_boot_firmware() -> KernelResult<(usize, usize)> {
             loaded.saturating_sub(read)
         );
     }
-    let files = module_files(FIRMWARE_MODULE, crate::boot::modules()).map_err(|refused| {
-        serial_println!(
-            "[boot] firmware module \"{}\": {}; no firmware placed",
-            refused.name.escape_ascii(),
-            refused.why
-        );
-        KernelError::InvalidArgument
-    })?;
-    let placed = place_firmware(&files, BOOT_FIRMWARE_DIR)?;
-    if placed.0 > 0 {
+    let files = mount_boot_files(FIRMWARE_MODULE, BOOT_FIRMWARE_DIR, "firmware")?;
+    if !files.is_empty() {
         BOOT_FIRMWARE_PLACED.store(true, core::sync::atomic::Ordering::Release);
     }
-    Ok(placed)
+    let bytes = files
+        .iter()
+        .fold(0usize, |sum, &(_, data)| sum.saturating_add(data.len()));
+    Ok((files.len(), bytes))
 }
 
 /// Where the boot medium's WiFi network file is put ([`mount_boot_wifi`]): a
 /// mount point of its own, as [`BOOT_FIRMWARE_DIR`] is, sealed read-only,
 /// whose files only a WiFi driver process joining a network is given the
-/// right to read ([`wifi_reading`], design-decisions 1596).
+/// right to read ([`wifi_reading`]), and gone before any other process runs
+/// ([`drop_boot_wifi`], design-decisions 1596).
 pub const BOOT_WIFI_DIR: &str = "/.boot-wifi";
 /// The `module_cmdline:` prefix that makes a module one of [`BOOT_WIFI_DIR`]'s
 /// files, what follows it the file's path there.
 const WIFI_MODULE: &[u8] = b"wifi/";
-/// The network file a WiFi driver process joins by (`join=`): an `ssid=`
-/// line and a `psk=` line, the passphrase, which nothing prints
-/// (`linuxdrv/emul/lx_wifi.c`). `scripts/pikvm.py stage --wifi` stages it.
-const WIFI_NETWORK_FILE: &str = "/.boot-wifi/network";
-/// Whether [`mount_boot_wifi`] placed a network file.
+/// The network file a WiFi driver process joins by (`join=`), under
+/// [`BOOT_WIFI_DIR`]: an `ssid=` line and a `psk=` line, the passphrase,
+/// which nothing prints (`linuxdrv/emul/lx_wifi.c`). `scripts/pikvm.py
+/// stage --wifi` stages it as the module `wifi/network`.
+const WIFI_NETWORK: &str = "network";
+/// Whether [`mount_boot_wifi`] mounted the boot medium's WiFi files, and
+/// whether the network file is among them.
+static BOOT_WIFI_MOUNTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 static BOOT_WIFI_PLACED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// The boot medium's WiFi network file -- every module limine.conf names
-/// `wifi/<path>` -- placed at `<path>` under [`BOOT_WIFI_DIR`], sealed
-/// read-only ([`place_firmware`]), as the firmware is. Whether one was: the
-/// file's contents and size are its own, and never said.
+/// [`WIFI_NETWORK`]'s path, under [`BOOT_WIFI_DIR`].
+fn wifi_network_file() -> alloc::string::String {
+    alloc::format!("{BOOT_WIFI_DIR}/{WIFI_NETWORK}")
+}
+
+/// The boot medium's WiFi files -- every module limine.conf names
+/// `wifi/<path>` -- placed at `<path>` under [`BOOT_WIFI_DIR`]
+/// ([`mount_boot_files`]). Whether the network file a join reads
+/// ([`WIFI_NETWORK`]) was among them: files without it are said, since no
+/// join is then run. What a file holds, and its size, are never said.
 ///
 /// # Errors
 ///
-/// `InvalidArgument`, said by name, for a module [`module_files`] refuses:
-/// nothing is placed. [`place_firmware`]'s.
+/// [`mount_boot_files`]'.
 pub fn mount_boot_wifi() -> KernelResult<bool> {
-    let files = module_files(WIFI_MODULE, crate::boot::modules()).map_err(|refused| {
-        serial_println!(
-            "[boot] WiFi module \"{}\": {}; no network file placed",
-            refused.name.escape_ascii(),
-            refused.why
-        );
-        KernelError::InvalidArgument
-    })?;
-    let (placed, _) = place_firmware(&files, BOOT_WIFI_DIR)?;
-    if placed > 0 {
-        BOOT_WIFI_PLACED.store(true, core::sync::atomic::Ordering::Release);
+    let files = mount_boot_files(WIFI_MODULE, BOOT_WIFI_DIR, "WiFi")?;
+    if files.is_empty() {
+        return Ok(false);
     }
-    Ok(placed > 0)
+    BOOT_WIFI_MOUNTED.store(true, core::sync::atomic::Ordering::Release);
+    let network = files
+        .iter()
+        .any(|&(path, _)| path == WIFI_NETWORK.as_bytes());
+    if !network {
+        serial_println!(
+            "[boot] WARNING: the boot medium's WiFi files hold no {WIFI_NETWORK} file: no network is joined"
+        );
+    }
+    BOOT_WIFI_PLACED.store(network, core::sync::atomic::Ordering::Release);
+    Ok(network)
+}
+
+/// The boot medium's WiFi files dropped -- [`mount_boot_wifi`]'s mount
+/// unmounted, the network file and its passphrase with it -- once the
+/// driver processes the kernel starts have read it, before init: so that no
+/// other process ever can, root's included, by any path, bind mount or
+/// syscall (design-decisions 1596). Then checked gone. Nothing when none
+/// was mounted.
+pub fn drop_boot_wifi() {
+    if !BOOT_WIFI_MOUNTED.swap(false, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    BOOT_WIFI_PLACED.store(false, core::sync::atomic::Ordering::Release);
+    let unmounted = crate::fs::vfs::Vfs::unmount(BOOT_WIFI_DIR);
+    let gone = crate::fs::vfs::Vfs::metadata(wifi_network_file().as_str()).is_err();
+    match (unmounted, gone) {
+        (Ok(()), true) => serial_println!(
+            "[boot] the boot medium's WiFi files dropped: no process reads them from here on"
+        ),
+        (unmounted, _) => serial_println!(
+            "[boot] WARNING: the boot medium's WiFi files at {BOOT_WIFI_DIR} were not dropped ({unmounted:?}): a process may read them"
+        ),
+    }
 }
 
 /// The right to read the boot medium's WiFi network file: a tree over
@@ -985,13 +1046,21 @@ pub fn mount_boot_wifi() -> KernelResult<bool> {
 ///
 /// # Errors
 ///
-/// The tree registry's (`fs::trees::register`).
+/// The tree registry's (`fs::trees::register`), said: the directory placed
+/// and not a tree is the kernel's own fault.
 fn wifi_reading() -> KernelResult<Option<(ResourceType, u64, Rights)>> {
     if !BOOT_WIFI_PLACED.load(core::sync::atomic::Ordering::Acquire) {
         return Ok(None);
     }
-    let id = crate::fs::trees::register(crate::fs::path::Path::new(BOOT_WIFI_DIR))?;
-    Ok(Some((ResourceType::FileTree, id, Rights::READ)))
+    match crate::fs::trees::register(crate::fs::path::Path::new(BOOT_WIFI_DIR)) {
+        Ok(id) => Ok(Some((ResourceType::FileTree, id, Rights::READ))),
+        Err(e) => {
+            serial_println!(
+                "[linuxdrv]   FAIL: the WiFi network file's directory {BOOT_WIFI_DIR}, placed and sealed, cannot be a tree: {e:?}"
+            );
+            Err(e)
+        }
+    }
 }
 
 /// [`module_path`] at its edges: each answer `None` (not
@@ -2137,25 +2206,9 @@ fn e1000e_serve(
         Network::Qemu => None,
     };
     let keyed: alloc::vec::Vec<&[u8]> = plain.iter().copied().chain(mode).collect();
-    let netstack = |limit_s| Program {
-        elf: spawn::NETSTACK_ELF,
-        name: "netstack-nic",
-        driver: false,
-        limit_s,
-        poll_ms: DAEMON_POLL_MS,
-    };
-    let keyless_stack = netstack(60);
-    let stack = netstack(if cable { 150 } else { 90 });
-    let run_daemon = |stack: &Program<'_>, args: &[&[u8]], key: &[(ResourceType, u64, Rights)]| {
-        let daemon = start(stack, args, key);
-        daemon.map(|d| finish(stack, &d))
-    };
+    let keyed_limit_s = if cable { 150 } else { 90 };
     // A mode the daemon does not know is refused before it attaches.
-    let unknown = run_daemon(
-        &keyless_stack,
-        &[b"netstack", b"nic-check", SERVICE, b"wifi"],
-        &[],
-    );
+    let unknown = run_daemon(60, &[b"netstack", b"nic-check", SERVICE, b"wifi"], &[]);
     if unknown != Ok(Some(check::USAGE)) {
         serial_println!(
             "[linuxdrv]   FAIL: the netstack daemon given a mode it does not know ended {:?} ({}): it should have refused it, exit {}",
@@ -2166,7 +2219,7 @@ fn e1000e_serve(
         spawn::teardown_fixture(driver.pid, driver.task_id);
         return Err(KernelError::InternalError);
     }
-    let keyless = run_daemon(&keyless_stack, plain, &[]);
+    let keyless = run_daemon(60, plain, &[]);
     if keyless != Ok(Some(check::TURNED_AWAY)) {
         serial_println!(
             "[linuxdrv]   FAIL: the netstack daemon without the card's key ended {:?} ({}): it should have been turned away, exit {}",
@@ -2180,7 +2233,7 @@ fn e1000e_serve(
         return Err(KernelError::InternalError);
     }
     let checked = match run_daemon(
-        &stack,
+        keyed_limit_s,
         &keyed,
         &[(ResourceType::Service, service, Rights::READ)],
     ) {
@@ -2217,7 +2270,7 @@ fn e1000e_serve(
             "not, or not as they should be"
         },
         program.limit_s,
-        stack.limit_s,
+        keyed_limit_s,
         if released {
             ""
         } else {
@@ -2286,14 +2339,9 @@ fn serve_sockets(service: &[u8], card_key: u64, cable: bool) -> Option<Resolved>
     // Attached, an address taken and `net.stack` registered: seconds, the
     // card being up already.
     let deadline = crate::hrtimer::now_ns().saturating_add(40_000_000_000);
-    let registered = || crate::ipc::service::is_registered(b"net.stack");
-    while !registered()
-        && crate::hrtimer::now_ns() < deadline
-        && pcb::state(daemon.pid) != Some(pcb::ProcessState::Zombie)
-    {
-        crate::sched::sleep_ms(DAEMON_POLL_MS);
-    }
-    let answer = registered().then(|| spawn::netstack_resolve_a(b"example.com"));
+    let answer = (await_registered(b"net.stack", daemon.pid, deadline, DAEMON_POLL_MS)
+        == Awaited::Registered)
+        .then(|| spawn::netstack_resolve_a(b"example.com"));
     // Where the harness can pull the card's cable, it is pulled and plugged
     // back under the serving daemon, which is asked all the while -- kept
     // from idling out -- and must, once the link is back, confirm its lease
@@ -2330,6 +2378,59 @@ fn serve_sockets(service: &[u8], card_key: u64, cable: bool) -> Option<Resolved>
             );
             None
         }
+    }
+}
+
+/// The netstack daemon run as `args`, holding `capabilities`, allowed
+/// `limit_s`: how it ended ([`finish`] -- its exit code, `None` past its
+/// limit), or why it could not be started.
+fn run_daemon(
+    limit_s: u64,
+    args: &[&[u8]],
+    capabilities: &[(ResourceType, u64, Rights)],
+) -> KernelResult<Option<i32>> {
+    let program = Program {
+        elf: spawn::NETSTACK_ELF,
+        name: "netstack-nic",
+        driver: false,
+        limit_s,
+        poll_ms: DAEMON_POLL_MS,
+    };
+    start(&program, args, capabilities).map(|daemon| finish(&program, &daemon))
+}
+
+/// How a wait for a process to register a service ended
+/// ([`await_registered`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Awaited {
+    /// The service is registered.
+    Registered,
+    /// The process ended first -- a zombie, or gone from the table.
+    Ended,
+    /// Neither, by the deadline.
+    TimedOut,
+}
+
+/// Wait, looking every `poll_ms`, until `service` is registered, the process
+/// `pid` -- which is to register it -- has ended, or the monotonic clock
+/// passes `deadline_ns`: which came first.
+fn await_registered(
+    service: &[u8],
+    pid: pcb::ProcessId,
+    deadline_ns: u64,
+    poll_ms: u64,
+) -> Awaited {
+    loop {
+        if crate::ipc::service::is_registered(service) {
+            return Awaited::Registered;
+        }
+        if !pcb::state(pid).is_some_and(|s| s != pcb::ProcessState::Zombie) {
+            return Awaited::Ended;
+        }
+        if crate::hrtimer::now_ns() >= deadline_ns {
+            return Awaited::TimedOut;
+        }
+        crate::sched::sleep_ms(poll_ms);
     }
 }
 

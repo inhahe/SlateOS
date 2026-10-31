@@ -813,7 +813,7 @@ void lx_end_run(const char *who, int err)
 	}
 	if (err)
 		pr_err("%s: the run failed: %d\n", who, err);
-	slx_exit(err ? SLX_EXIT_INIT_FAILED : SLX_EXIT_OK);
+	slx_exit(err ? SLX_EXIT_RUN_FAILED : SLX_EXIT_OK);
 }
 
 void slx_warn(const char *file, int line, unsigned int flags)

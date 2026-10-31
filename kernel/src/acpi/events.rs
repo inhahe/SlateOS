@@ -192,6 +192,10 @@ pub fn init() {
         );
         return;
     }
+    // Read before ACPI mode is taken, which firmware may answer by
+    // rewriting them: what is put back for the firmware is what it had.
+    // SAFETY: the FADT's blocks.
+    let firmware_enables = unsafe { FirmwareEnables::read(&f) };
     let taken = if os_has_it {
         false
     } else if set_acpi_mode(&f, true) {
@@ -207,8 +211,6 @@ pub fn init() {
         );
         return;
     };
-    // SAFETY: the FADT's blocks.
-    let firmware_enables = unsafe { FirmwareEnables::read(&f) };
     // SAFETY: the FADT's blocks, in ACPI mode.
     unsafe { arm_events(&f) };
     ARMED.call_once(|| f);
@@ -319,10 +321,10 @@ unsafe fn arm_events(f: &PowerInfo) {
     }
 }
 
-/// The enable registers [`arm_events`] rewrites, as the firmware had them:
-/// each PM1 event block's ([`pm1_blocks`]' order), then each GPE enable
-/// byte ([`gpe_ports`]'). What [`init`] puts back when it cannot take the
-/// SCI after all.
+/// The enable registers [`arm_events`] rewrites, as the firmware handed them
+/// over -- read before ACPI mode is taken: each PM1 event block's
+/// ([`pm1_blocks`]' order), then each GPE enable byte ([`gpe_ports`]').
+/// What [`init`] puts back when it cannot take the SCI after all.
 struct FirmwareEnables {
     pm1: alloc::vec::Vec<u16>,
     gpe: alloc::vec::Vec<u8>,

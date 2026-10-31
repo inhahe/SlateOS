@@ -139,16 +139,24 @@ pub fn unshare(pid: crate::proc::pcb::ProcessId, kind: NsKind) -> KernelResult<(
 ///
 /// # Errors
 ///
-/// `NotFound` if the namespace went with its last holder meanwhile (a handle
-/// closed by another thread, the process a pidfd names leaving it);
-/// `NoSuchProcess`.
+/// `PermissionDenied` for a mount namespace the kernel sealed
+/// (`fs::mntns::seal`), whatever authority the caller holds; `NotFound` if
+/// the namespace went with its last holder meanwhile (a handle closed by
+/// another thread, the process a pidfd names leaving it); `NoSuchProcess`,
+/// the hold taken for it given back.
 pub fn enter(pid: crate::proc::pcb::ProcessId, kind: NsKind, id: u64) -> KernelResult<()> {
+    if kind == NsKind::Mnt && crate::fs::mntns::is_sealed(id) {
+        return Err(KernelError::PermissionDenied);
+    }
     if !retain(encode(kind, id)) {
         return Err(KernelError::NotFound);
     }
     match kind {
         NsKind::Mnt => {
-            crate::proc::pcb::state(pid).ok_or(KernelError::NoSuchProcess)?;
+            if crate::proc::pcb::state(pid).is_none() {
+                release(encode(kind, id));
+                return Err(KernelError::NoSuchProcess);
+            }
             crate::fs::mntns::set_process(pid, id);
             crate::proc::pcb::set_cwd(pid, alloc::vec![b'/'])
         }

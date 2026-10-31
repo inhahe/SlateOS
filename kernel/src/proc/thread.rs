@@ -63,19 +63,90 @@ static THREAD_OWNERS: Mutex<BTreeMap<TaskId, ProcessId>> =
     Mutex::named(BTreeMap::new(), b"THRDOWN");
 
 // ---------------------------------------------------------------------------
+// Per-task values held for the length of a call
+// ---------------------------------------------------------------------------
+
+/// A value each task may hold for the length of a call ([`Self::with`]),
+/// nested, and asked by whoever must judge the task meanwhile
+/// ([`Self::get`]) -- on every path operation, for the two there are: the
+/// kernel's authority ([`as_kernel`]) and the mount namespace a task
+/// resolves its paths in (`fs::mntns::in_namespace`). Asked without a lock
+/// while no task holds one.
+pub(crate) struct TaskScoped<T: Copy + PartialEq + 'static> {
+    /// Each task's innermost value. A leaf lock: nothing is called while it
+    /// is held.
+    held: Mutex<BTreeMap<TaskId, T>>,
+    /// How many tasks hold a value now.
+    holders: core::sync::atomic::AtomicUsize,
+}
+
+impl<T: Copy + PartialEq + 'static> TaskScoped<T> {
+    /// None held; `lock_name` names its lock in a deadlock report.
+    pub(crate) const fn new(lock_name: &'static [u8]) -> Self {
+        Self {
+            held: Mutex::named(BTreeMap::new(), lock_name),
+            holders: core::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// The innermost value `task` holds, `None` outside every [`Self::with`].
+    pub(crate) fn get(&self, task: TaskId) -> Option<T> {
+        if self.holders.load(core::sync::atomic::Ordering::Acquire) == 0 {
+            return None;
+        }
+        self.held.lock().get(&task).copied()
+    }
+
+    /// How many tasks hold a value now.
+    pub(crate) fn holders(&self) -> usize {
+        self.holders.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// `body` run with the calling task holding `value`, and what it held
+    /// before -- an outer call's, or none -- put back after: calls nest, an
+    /// inner one ending only its own part. Each call keeps what it replaced,
+    /// so a value is found where it was put, and one not found there is said:
+    /// the task's entry was changed by something other than these calls.
+    pub(crate) fn with<R>(&self, value: T, body: impl FnOnce() -> R) -> R {
+        use core::sync::atomic::Ordering;
+        let task = sched::current_task_id();
+        let outer = {
+            let mut held = self.held.lock();
+            let outer = held.insert(task, value);
+            if outer.is_none() {
+                self.holders.fetch_add(1, Ordering::AcqRel);
+            }
+            outer
+        };
+        let result = body();
+        let mut held = self.held.lock();
+        let found = match outer {
+            Some(outer) => held.insert(task, outer),
+            None => {
+                let found = held.remove(&task);
+                if found.is_some() {
+                    self.holders.fetch_sub(1, Ordering::AcqRel);
+                }
+                found
+            }
+        };
+        drop(held);
+        if found != Some(value) {
+            crate::serial_println!(
+                "[thread] WARNING: task {}'s scoped value was not where its call put it at the call's end: changed by something else",
+                task
+            );
+        }
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Acting with the kernel's own authority
 // ---------------------------------------------------------------------------
 
-/// The tasks inside [`as_kernel`] now, each with how deeply it is nested.
-///
-/// A leaf lock: nothing is called while it is held.
-static KERNEL_ACTING: Mutex<BTreeMap<TaskId, u32>> = Mutex::named(BTreeMap::new(), b"KACTING");
-
-/// How many tasks are inside [`as_kernel`] now, so [`acting_process`] answers
-/// without the lock in the common case of none: it is asked on every path
-/// operation.
-static KERNEL_ACTING_COUNT: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+/// The tasks inside [`as_kernel`] now.
+static KERNEL_ACTING: TaskScoped<()> = TaskScoped::new(b"KACTING");
 
 /// The process a permission decision should treat `task` as acting for: the
 /// one it belongs to ([`owner_process`]), or none -- the kernel -- while it is
@@ -88,9 +159,7 @@ static KERNEL_ACTING_COUNT: core::sync::atomic::AtomicUsize =
 /// `as_kernel` leaves alone.
 #[must_use]
 pub(crate) fn acting_process(task: TaskId) -> Option<ProcessId> {
-    if KERNEL_ACTING_COUNT.load(core::sync::atomic::Ordering::Acquire) != 0
-        && KERNEL_ACTING.lock().contains_key(&task)
-    {
+    if KERNEL_ACTING.get(task).is_some() {
         return None;
     }
     owner_process(task)
@@ -111,32 +180,7 @@ pub(crate) fn acting_process(task: TaskId) -> Option<ProcessId> {
 ///
 /// Nests: an inner call ends only its own part.
 pub(crate) fn as_kernel<R>(body: impl FnOnce() -> R) -> R {
-    use core::sync::atomic::Ordering;
-    let task = sched::current_task_id();
-    {
-        let mut acting = KERNEL_ACTING.lock();
-        let depth = acting.entry(task).or_insert(0);
-        if *depth == 0 {
-            KERNEL_ACTING_COUNT.fetch_add(1, Ordering::AcqRel);
-        }
-        *depth = depth.saturating_add(1);
-    }
-    let result = body();
-    {
-        let mut acting = KERNEL_ACTING.lock();
-        let ended = match acting.get_mut(&task) {
-            Some(depth) => {
-                *depth = depth.saturating_sub(1);
-                *depth == 0
-            }
-            None => false,
-        };
-        if ended {
-            acting.remove(&task);
-            KERNEL_ACTING_COUNT.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-    result
+    KERNEL_ACTING.with((), body)
 }
 
 // ---------------------------------------------------------------------------

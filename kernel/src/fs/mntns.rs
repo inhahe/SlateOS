@@ -25,9 +25,9 @@
 
 use crate::error::{KernelError, KernelResult};
 use crate::proc::pcb::ProcessId;
-use crate::sched::task::TaskId;
+use crate::proc::thread::TaskScoped;
 use crate::sync::Mutex;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -57,13 +57,12 @@ static OTHERS: AtomicUsize = AtomicUsize::new(0);
 /// The next id to give.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-/// The tasks inside [`in_namespace`] now, each with the namespaces it
-/// entered, the innermost last. A leaf lock, asked by [`current`].
-static ENTERED: Mutex<BTreeMap<TaskId, Vec<MntNsId>>> = Mutex::named(BTreeMap::new(), b"MNTNSENT");
+/// The tasks inside [`in_namespace`] now, each with the namespace it
+/// entered last, which [`current`] answers for it.
+static ENTERED: TaskScoped<MntNsId> = TaskScoped::new(b"MNTNSENT");
 
-/// How many tasks are inside [`in_namespace`] now, so [`current`] answers
-/// without its lock in the common case of none.
-static ENTERING: AtomicUsize = AtomicUsize::new(0);
+/// The namespaces no process may enter ([`seal`]). A leaf lock.
+static SEALED: Mutex<BTreeSet<MntNsId>> = Mutex::named(BTreeSet::new(), b"MNTNSSEAL");
 
 /// Whether any namespace besides the root exists.
 #[must_use]
@@ -124,9 +123,7 @@ pub fn current() -> MntNsId {
         return ROOT;
     }
     let task = crate::sched::current_task_id();
-    if ENTERING.load(Ordering::Acquire) != 0
-        && let Some(&ns) = ENTERED.lock().get(&task).and_then(|entered| entered.last())
-    {
+    if let Some(ns) = ENTERED.get(task) {
         return ns;
     }
     crate::proc::thread::acting_process(task)
@@ -151,29 +148,35 @@ pub fn in_namespace<R>(ns: MntNsId, body: impl FnOnce() -> R) -> KernelResult<R>
     if !retain(ns) {
         return Err(KernelError::NotFound);
     }
-    let task = crate::sched::current_task_id();
-    {
-        let mut entered = ENTERED.lock();
-        let stack = entered.entry(task).or_default();
-        if stack.is_empty() {
-            ENTERING.fetch_add(1, Ordering::AcqRel);
-        }
-        stack.push(ns);
-    }
-    let result = body();
-    {
-        let mut entered = ENTERED.lock();
-        let ended = entered.get_mut(&task).is_some_and(|stack| {
-            stack.pop();
-            stack.is_empty()
-        });
-        if ended {
-            entered.remove(&task);
-            ENTERING.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
+    let result = ENTERED.with(ns, body);
     release(ns);
     Ok(result)
+}
+
+/// Namespace `id` sealed: no process may enter it from here on
+/// (`nsfs::enter`, which every `setns` and `SYS_NAMESPACE_ENTER_PROCESS`
+/// goes through), whatever authority it holds -- for one the kernel placed
+/// a process's secret in ([`in_namespace`]), which only the processes the
+/// kernel puts there ([`set_process`]) and their children are to reach. A
+/// copy of it ([`create_from`], an `unshare` by one of those) is sealed
+/// too. The seal goes with the namespace. Nothing for the root.
+pub fn seal(id: MntNsId) {
+    if id != ROOT && exists(id) {
+        SEALED.lock().insert(id);
+    }
+}
+
+/// Whether namespace `id` is sealed ([`seal`]).
+#[must_use]
+pub fn is_sealed(id: MntNsId) -> bool {
+    id != ROOT && SEALED.lock().contains(&id)
+}
+
+/// Whether namespace `id` exists: the root, or one some process or handle
+/// holds.
+#[must_use]
+pub fn exists(id: MntNsId) -> bool {
+    id == ROOT || HOLDS.lock().contains_key(&id)
 }
 
 /// A new namespace with a copy of `from`'s table, held once by the caller
@@ -193,9 +196,15 @@ pub fn create_from(from: MntNsId) -> KernelResult<MntNsId> {
         holds.insert(id, 1);
     }
     OTHERS.fetch_add(1, Ordering::AcqRel);
+    // A copy of a sealed namespace holds what the seal keeps -- the copy of
+    // its mounts -- so is sealed too, before its table exists to be reached.
+    if is_sealed(from) {
+        SEALED.lock().insert(id);
+    }
     // The table, after the hold exists: a lookup that sees the id finds the
     // table, and one that does not yet cannot be in it.
     if let Err(e) = crate::fs::Vfs::copy_mount_table(from, id) {
+        SEALED.lock().remove(&id);
         HOLDS.lock().remove(&id);
         OTHERS.fetch_sub(1, Ordering::AcqRel);
         return Err(e);
@@ -237,6 +246,7 @@ pub fn release(id: MntNsId) {
         last
     };
     if gone {
+        SEALED.lock().remove(&id);
         crate::fs::Vfs::drop_mount_table(id);
         OTHERS.fetch_sub(1, Ordering::AcqRel);
     }
@@ -359,7 +369,7 @@ pub fn self_test() -> KernelResult<()> {
     // A kernel task inside a namespace resolves its paths there, and only
     // while it is: a mount made inside lands in that namespace's table, and
     // the root's own lookups never see it.
-    let entered = entered_check()?;
+    let entered = entered_check()?.or(sealed_check()?);
     if !copied {
         return fail("a new namespace did not start with a copy of the root's mounts");
     }
@@ -378,6 +388,39 @@ pub fn self_test() -> KernelResult<()> {
     Ok(())
 }
 
+/// [`seal`] checked: a process entering a namespace gets past the seal's
+/// refusal only while there is none, a copy of a sealed namespace is sealed,
+/// and the seal goes with the namespace.
+/// What was not so, `None` when all was. No process is moved: the pid
+/// entered with names none, which an open namespace's entry finds after
+/// the seal's check, and a sealed one's never reaches.
+///
+/// # Errors
+///
+/// [`create_from`]'s.
+fn sealed_check() -> KernelResult<Option<&'static str>> {
+    use crate::nsfs::NsKind;
+    const NO_SUCH_PROCESS: ProcessId = ProcessId::MAX;
+    let ns = create_from(ROOT)?;
+    let open = crate::nsfs::enter(NO_SUCH_PROCESS, NsKind::Mnt, ns);
+    seal(ns);
+    let shut = crate::nsfs::enter(NO_SUCH_PROCESS, NsKind::Mnt, ns);
+    let copy = create_from(ns)?;
+    let sealed = is_sealed(ns) && is_sealed(copy);
+    release(copy);
+    release(ns);
+    // The entries refused took no hold: the namespace went with this one.
+    let gone = !exists(ns) && !is_sealed(ns);
+    Ok(match (open, shut) {
+        (Err(KernelError::NoSuchProcess), Err(KernelError::PermissionDenied)) if sealed && gone => {
+            None
+        }
+        _ => Some(
+            "a sealed namespace's entry was not refused, a refused entry kept a hold, or the seal outlived its namespace",
+        ),
+    })
+}
+
 /// [`in_namespace`] checked: what was not so, `None` when all was.
 ///
 /// # Errors
@@ -387,6 +430,7 @@ fn entered_check() -> KernelResult<Option<&'static str>> {
     use crate::fs::Vfs;
     const AT: &str = "/mntns-selftest-entered";
     let ns = create_from(ROOT)?;
+    let holders = ENTERED.holders();
     let inside = in_namespace(ns, || {
         let here = current();
         let mounted = Vfs::mount(AT, alloc::boxed::Box::new(crate::fs::memfs::MemFs::new()));
@@ -399,10 +443,16 @@ fn entered_check() -> KernelResult<Option<&'static str>> {
     let nested = in_namespace(ns, || {
         in_namespace(ROOT, current).ok() == Some(ROOT) && current() == ns
     });
+    // Every task's entry gone with its last call: the count back where it
+    // was, so `current` asks no lock it need not.
+    let balanced = ENTERED.holders() == holders;
     release(ns);
     let missing = in_namespace(ns, current);
     Ok(match inside {
         _ if missing.is_ok() => Some("a namespace that is gone was entered"),
+        _ if !balanced => {
+            Some("a task that left every namespace it entered is still counted inside one")
+        }
         Ok((here, true, true)) if here == ns && in_ns && !in_root && after == ROOT => {
             (nested != Ok(true)).then_some("a nested namespace did not end only its own part")
         }

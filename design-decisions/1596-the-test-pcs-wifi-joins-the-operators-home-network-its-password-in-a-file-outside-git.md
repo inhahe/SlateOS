@@ -33,16 +33,22 @@ printed in a log.
    the file (`linuxdrv::note_boot_wifi`). It places it at `/.boot-wifi`
    for the join run alone (`linuxdrv::place_boot_wifi`), in a mount
    namespace of the joining driver's own, which the driver is started in
-   before it runs an instruction (`linuxdrv::start_in`), so that no path
-   from any other namespace names it, whatever capability the asker holds
-   (`fs::mntns::in_namespace` places it there). It detaches its mount the
+   before it runs an instruction (`linuxdrv::start_in`) and which no
+   process may enter, root included (`fs::mntns::seal`): no path from any
+   other namespace names it, whatever capability its process holds
+   (`fs::mntns::in_namespace` places it there). What the driver holds in
+   its memory -- the passphrase until it has parsed it, then the PMK -- a
+   process allowed to inspect it, root, could still read (known-issues
+   A-ROOT-CAN-READ-A-WIFI-DRIVERS-KEYS-FROM-ITS-MEMORY). Once the file is
+   dropped the driver goes back to the root namespace, and its own ends.
+   It detaches its mount the
    moment the joining process has served the card, or ended, or run out of
    time (`linuxdrv::drop_boot_wifi`) -- and again, in case, before init --
    so that no other process can read it, root's included, by any path,
    bind mount or syscall. Until 2026-10-31 it was placed in the root
    namespace, where a process holding the general `File` capability could
    have read it while it was there (known-issues
-   A-THE-WIFI-FILE-IS-IN-THE-ROOT-NAMESPACE-WHILE-PLACED, fixed). A driver started for the system's
+   A-THE-WIFI-FILE-IS-IN-THE-ROOT-NAMESPACE-WHILE-PLACED, fixed on lane A, pending a boot on main). A driver started for the system's
    life that must join again later will need the PMK kept for it
    (known-issues A-WIFI-REKEYS-AND-LOST-LINKS-ARE-NOT-ANSWERED).
 5. **Nor is it left in memory once read** (added after the second review,

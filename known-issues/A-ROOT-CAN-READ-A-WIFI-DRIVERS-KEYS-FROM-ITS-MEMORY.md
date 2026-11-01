@@ -9,15 +9,21 @@ driver itself holds the network's secrets in its memory -- the passphrase
 from its read until it has parsed it, then the PMK (the key derived from
 the passphrase, which joins the network as well as the passphrase does)
 for as long as it serves the card. A root process may read any process's
-memory, the driver's included, so root could still take the key. Today no
-such process runs while a driver holds one, since the boot's join comes
-before every long-lived process starts.
+memory, the driver's included, so root could still take the key. One does
+run beside it: during the join the netstack daemon, which runs as root,
+checks the joined network and serves sockets over it, parsing DHCP, ARP
+and DNS from the real home network -- a daemon a hostile packet took over
+could read the driver's PMK. Other driver processes, which share the WiFi
+driver's user, may not: every driver process is made undumpable at its
+start (`linuxdrv::start_in`), which takes away the own-user route.
 
 **Where.** `kernel/src/proc/pcb.rs`, `may_access` (behind `may_inspect`):
 the kernel, the target itself, uid 0, and the target's own user while it is
 dumpable may read a process's memory -- `process_vm_readv`, `ptrace`,
 `/proc/<pid>/mem`. The driver runs as `linuxdrv::DRIVER_UID`, not root, and
-nothing marks it as a process root may not inspect.
+undumpable, and nothing marks it as a process root may not inspect.
+`linuxdrv::wifi_join_run` starts the netstack daemon (`run_daemon`,
+`serve_sockets`) as root while the driver serves the card.
 
 **The proper fix.** A process the kernel starts holding a secret of the
 system's -- a WiFi driver with a PMK, and any later one like it -- marked so
@@ -29,6 +35,10 @@ process's own to clear. Whether root should be refused at all is a policy
 question for the operator before it is built: it also stops a root debugger
 or tracer on such a driver.
 
-Trigger: a WiFi driver that serves for the system's life, or rejoins a lost
-link (known-issues A-WIFI-REKEYS-AND-LOST-LINKS-ARE-NOT-ANSWERED), while
-other processes run.
+Two things narrow it short of the fix: the netstack daemon run as a user
+of its own rather than root, and the daemon's own sandbox. Neither closes
+it for every root process.
+
+Trigger: now, for the join's root netstack daemon; and a WiFi driver that
+serves for the system's life, or rejoins a lost link (known-issues
+A-WIFI-REKEYS-AND-LOST-LINKS-ARE-NOT-ANSWERED), while other processes run.

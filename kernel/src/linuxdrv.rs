@@ -119,23 +119,28 @@ fn start(
     argv: &[&[u8]],
     capabilities: &[(ResourceType, u64, Rights)],
 ) -> KernelResult<spawn::SpawnResult> {
-    start_in(program, argv, capabilities, crate::fs::mntns::ROOT)
+    start_in(program, argv, capabilities, None)
 }
 
 /// [`start`], the process in mount namespace `ns` from its first
-/// instruction -- holding `ns` for as long as it lives -- and checked not to
-/// be root before it runs one.
+/// instruction where one is given -- the caller's hold on it handed to the
+/// process, so that the namespace ends with the process, a mount table that
+/// keeps every path lookup on the machine uncached while it exists
+/// (`fs::Vfs::copy_mount_table`) -- and checked not to be root before it
+/// runs one. A driver process is not dumpable (`PR_SET_DUMPABLE` 0): no
+/// other process of its user, which every driver process shares, may
+/// inspect it.
 ///
 /// # Errors
 ///
 /// The spawn's; `InternalError`, said, for a driver process that would be
-/// root all the same; `NotFound` for an `ns` that does not exist. Nothing of
-/// the process is left after any.
+/// root all the same. Nothing of the process is left after any, and `ns`'s
+/// hold given up.
 fn start_in(
     program: &Program<'_>,
     argv: &[&[u8]],
     capabilities: &[(ResourceType, u64, Rights)],
-    ns: crate::fs::mntns::MntNsId,
+    ns: Option<crate::fs::mntns::Held>,
 ) -> KernelResult<spawn::SpawnResult> {
     const PATH_KEY: &[u8] = b"firmware_class.path=";
     // Outlives `args`, which borrows it; made only when it is passed.
@@ -189,12 +194,17 @@ fn start_in(
         );
         return Err(KernelError::InternalError);
     }
-    if ns != crate::fs::mntns::ROOT {
-        // The process's own hold, which its end gives up.
-        if !crate::fs::mntns::retain(ns) {
-            return Err(KernelError::NotFound);
-        }
-        crate::fs::mntns::set_process(process.pid(), ns);
+    if program.driver && pcb::set_dumpable(process.pid(), 0).is_none() {
+        serial_println!(
+            "[linuxdrv]   FAIL: the driver process {} (pid {}) could not be made undumpable",
+            program.name,
+            process.pid()
+        );
+        return Err(KernelError::InternalError);
+    }
+    if let Some(ns) = ns {
+        // The process's own from here on: its end gives it up.
+        ns.give_to(process.pid());
     }
     process.start()
 }
@@ -600,11 +610,8 @@ fn wifi_runs(
         // Placed for the join alone, in the joining driver's own namespace,
         // and dropped whatever it came to (the join drops it as soon as its
         // driver has read it).
-        let ran = joining_namespace().and_then(|ns| {
-            let ran = place_boot_wifi(ns)
-                .and_then(|network| wifi_join_run(elf, &arg, &caps, network, ns));
-            crate::fs::mntns::release(ns);
-            ran
+        let ran = driver_namespace("the WiFi network file").and_then(|ns| {
+            place_boot_wifi(&ns).and_then(|network| wifi_join_run(elf, &arg, &caps, network, ns))
         });
         let dropped = drop_boot_wifi();
         ran?;
@@ -643,7 +650,7 @@ fn wifi_join_run(
     pci: &str,
     capabilities: &[(ResourceType, u64, Rights)],
     network: (ResourceType, u64, Rights),
-    ns: crate::fs::mntns::MntNsId,
+    ns: crate::fs::mntns::Held,
 ) -> KernelResult<()> {
     /// How long firmware, a scan and a join may take before the card is
     /// served: the driver process's own worst case, which it says the end
@@ -674,7 +681,7 @@ fn wifi_join_run(
             b"stacks=2",
         ],
         &caps,
-        ns,
+        Some(ns),
     )?;
     let fail = |what: &str, driver: &spawn::SpawnResult| {
         let ended = stop(driver);
@@ -691,14 +698,6 @@ fn wifi_join_run(
     // The driver has read the network file -- it joined, or it is done
     // trying: nothing else may.
     let dropped = drop_boot_wifi();
-    if dropped.is_ok() {
-        // Its namespace holds nothing the root's lacks now, and keeps every
-        // path lookup on the machine uncached while it exists (more than one
-        // mount table, `fs::Vfs::copy_mount_table`), and the driver from
-        // mounts the root makes later: the driver goes back to the root, and
-        // the namespace ends with the caller's hold.
-        crate::fs::mntns::set_process(driver.pid, crate::fs::mntns::ROOT);
-    }
     match awaited {
         Awaited::Registered => {}
         Awaited::Ended => return Err(fail("ended before it served the card", &driver)),
@@ -1095,26 +1094,38 @@ pub fn note_boot_wifi() -> bool {
 /// ([`drop_boot_wifi`]), or `ns` is gone. [`mount_boot_files`]', or the
 /// tree registry's, said: a directory placed and not a tree is the kernel's
 /// own fault. What was mounted stays for [`drop_boot_wifi`] to take away.
-fn place_boot_wifi(ns: crate::fs::mntns::MntNsId) -> KernelResult<(ResourceType, u64, Rights)> {
+fn place_boot_wifi(ns: &crate::fs::mntns::Held) -> KernelResult<(ResourceType, u64, Rights)> {
+    use crate::fs::mntns;
     if !BOOT_WIFI_CARRIED.load(core::sync::atomic::Ordering::Acquire) {
         return Err(KernelError::NotFound);
     }
-    // Before the file is there: no process may enter the namespace, root's
-    // included, which could otherwise read it by its path from inside.
-    crate::fs::mntns::seal(ns);
-    crate::fs::mntns::in_namespace(ns, place_boot_wifi_here)?
+    // Only where no process may enter, root's included -- which could
+    // otherwise read the file by its path from inside -- and where none
+    // is, or holds a handle on it: the namespace is the caller's alone.
+    let id = ns.id();
+    if !mntns::is_sealed(id) || mntns::holds(id) != 1 {
+        serial_println!(
+            "[linuxdrv]   FAIL: the WiFi network file was to be placed in mount namespace {id}, which is not sealed ({}) or held by others ({} hold(s)): it is not placed",
+            mntns::is_sealed(id),
+            mntns::holds(id)
+        );
+        return Err(KernelError::InternalError);
+    }
+    mntns::in_namespace(id, place_boot_wifi_here)?
 }
 
-/// A mount namespace for a WiFi driver process to join in
-/// ([`place_boot_wifi`]): a copy of the root's, held once by the caller.
+/// A mount namespace for a driver process to run in with `what` placed
+/// there alone ([`place_boot_wifi`], [`namespaced_run`]): a copy of the
+/// root's, sealed from its birth (`fs::mntns::create_sealed`), held by the
+/// caller alone, who hands the hold to the process ([`start_in`]).
 ///
 /// # Errors
 ///
 /// [`crate::fs::mntns::create_from`]'s, said.
-fn joining_namespace() -> KernelResult<crate::fs::mntns::MntNsId> {
-    crate::fs::mntns::create_from(crate::fs::mntns::ROOT).inspect_err(|e| {
+fn driver_namespace(what: &str) -> KernelResult<crate::fs::mntns::Held> {
+    crate::fs::mntns::create_sealed().inspect_err(|e| {
         serial_println!(
-            "[linuxdrv]   FAIL: no mount namespace could be made for the WiFi network file ({e:?}): it is not placed"
+            "[linuxdrv]   FAIL: no mount namespace could be made for {what} ({e:?}): it is not placed"
         );
     })
 }
@@ -1257,7 +1268,7 @@ fn wifi_placement_check() -> KernelResult<()> {
     let wiped_before = crate::fs::memfs::wiped_bytes_on_drop();
     // The joining driver's own namespace, as the join makes it: the file is
     // placed there, and every look at it from there is made inside it.
-    let ns = match joining_namespace() {
+    let ns = match driver_namespace("the WiFi network file's check") {
         Ok(ns) => ns,
         Err(e) => {
             // Nothing placed; the module wiped all the same.
@@ -1269,8 +1280,8 @@ fn wifi_placement_check() -> KernelResult<()> {
         }
     };
     let size = || Vfs::metadata(wifi_network_file().as_str()).map(|m| m.size);
-    let size_in_ns = || mntns::in_namespace(ns, size).and_then(|r| r);
-    let placed = place_boot_wifi(ns);
+    let size_in_ns = || mntns::in_namespace(ns.id(), size).and_then(|r| r);
+    let placed = place_boot_wifi(&ns);
     let held = size_in_ns();
     // Nor may any process enter the namespace to read it from inside: an
     // entry is refused before the process it names is even looked up.
@@ -1278,9 +1289,9 @@ fn wifi_placement_check() -> KernelResult<()> {
         crate::nsfs::enter(
             crate::proc::pcb::ProcessId::MAX,
             crate::nsfs::NsKind::Mnt,
-            ns
+            ns.id()
         ),
-        Err(KernelError::PermissionDenied)
+        Err(KernelError::NotPermitted)
     );
     // No other namespace's path names it, the root's least of all.
     let seen = size();
@@ -1288,8 +1299,8 @@ fn wifi_placement_check() -> KernelResult<()> {
     // A namespace made from the driver's while it is placed, as by the
     // driver unsharing, holds a copy of its mount, and a mount stacked on it
     // hides it at its path: the drop must take both.
-    let copy = mntns::create_from(ns);
-    let stacked = mntns::in_namespace(ns, || {
+    let copy = mntns::create_held_from(ns.id());
+    let stacked = mntns::in_namespace(ns.id(), || {
         Vfs::mount_on_top(
             BOOT_WIFI_DIR,
             alloc::boxed::Box::new(crate::fs::memfs::MemFs::new()),
@@ -1299,19 +1310,18 @@ fn wifi_placement_check() -> KernelResult<()> {
     .and_then(|r| r);
     let dropped = drop_boot_wifi();
     let stacked_left =
-        mntns::in_namespace(ns, || Vfs::is_mount_point(BOOT_WIFI_DIR)).unwrap_or(true);
+        mntns::in_namespace(ns.id(), || Vfs::is_mount_point(BOOT_WIFI_DIR)).unwrap_or(true);
     // Whatever a failing drop left in the namespaces goes with them, below.
     let after = (
         fs_id != 0 && Vfs::filesystem_mounted(fs_id),
         size_in_ns(),
         crate::fs::memfs::wiped_bytes_on_drop().wrapping_sub(wiped_before),
         crate::boot::module(&module).map(|bytes| bytes.iter().all(|&b| b == 0)),
-        place_boot_wifi(ns),
+        place_boot_wifi(&ns),
     );
-    if let Ok(copy) = copy {
-        mntns::release(copy);
-    }
-    mntns::release(ns);
+    let copied = copy.is_ok();
+    drop(copy);
+    drop(ns);
     let tree = matches!(placed, Ok((ResourceType::FileTree, _, rights)) if rights == Rights::READ);
     let as_long = len.is_some_and(|n| Ok(n) == held);
     match after {
@@ -1326,7 +1336,7 @@ fn wifi_placement_check() -> KernelResult<()> {
             && matches!(seen, Err(KernelError::NotFound))
             && sealed
             && fs_id != 0
-            && copy.is_ok()
+            && copied
             && stacked.is_ok()
             && !stacked_left
             && dropped.is_ok()
@@ -1341,7 +1351,7 @@ fn wifi_placement_check() -> KernelResult<()> {
             serial_println!(
                 "[linuxdrv]   FAIL: the WiFi network file of {len:?} byte(s) placed {:?} (its size there {held:?}, from the root's namespace {seen:?}, its namespace sealed {sealed}, its filesystem {fs_id}, a namespace copied {:?}, a mount stacked on it {stacked:?}), then dropped {dropped:?}: still mounted {mounted}, the stacked mount left {stacked_left}, its path {size:?}, {memfs_wiped} byte(s) zeroed in the memfs, its module wiped {wiped:?}, placed again {:?}",
                 placed.map(|(kind, _, rights)| (kind, rights)),
-                copy.map(|_| ()),
+                copied,
                 again.map(|(kind, _, rights)| (kind, rights))
             );
             Err(KernelError::InternalError)
@@ -1568,14 +1578,16 @@ fn check_place_firmware(skips: &mut crate::fs::selftest::Skips) -> KernelResult<
 /// given no capability to read files, or only one to read beneath another
 /// directory, not loaded, the run ending as a failed initcall: so that a run
 /// passing for a hello that did nothing is caught, and a tree that let its
-/// holder out of it too.
+/// holder out of it too. Then the same run in a sealed mount namespace of
+/// its own, a copy of the firmware placed there alone ([`namespaced_run`]).
 /// Whether it ran: skipped, and recorded so, where the boot medium carries
 /// no such module.
 ///
 /// # Errors
 ///
 /// `InternalError`, said, when the file is not there as the module was, a
-/// write to its directory is let through, or a run ends otherwise.
+/// write to its directory is let through, a run ends otherwise, or the
+/// namespaced run is not as [`namespaced_run`] says.
 fn boot_firmware_run(
     hello: &Program<'_>,
     skips: &mut crate::fs::selftest::Skips,
@@ -1683,11 +1695,10 @@ fn namespaced_run(hello: &Program<'_>, module: &[u8]) -> KernelResult<()> {
         );
         KernelError::InternalError
     };
-    let ns = mntns::create_from(mntns::ROOT)
-        .map_err(|e| fail(&alloc::format!("none could be made ({e:?})")))?;
-    mntns::seal(ns);
+    let ns = driver_namespace("a driver process's firmware")?;
+    let id = ns.id();
     let ran = (|| {
-        let tree = mntns::in_namespace(ns, || {
+        let tree = mntns::in_namespace(id, || {
             place_firmware(&[(b"slateos/hello.fw", module)], NAMESPACED_DIR, false)?;
             crate::fs::trees::register(crate::fs::path::Path::new(NAMESPACED_DIR))
         })
@@ -1706,11 +1717,11 @@ fn namespaced_run(hello: &Program<'_>, module: &[u8]) -> KernelResult<()> {
             hello,
             &[b"hello", b"bootfw", path_arg.as_bytes()],
             &[(ResourceType::FileTree, tree, Rights::READ)],
-            ns,
+            Some(ns),
         )
         .map_err(|e| fail(&alloc::format!("it could not be started there ({e:?})")))?;
         // Still a member until its teardown, ended or not.
-        let member = mntns::of_process(process.pid) == ns;
+        let member = mntns::of_process(process.pid) == id;
         let ended = finish(hello, &process);
         if !member {
             return Err(fail("it was not in the namespace it was started in"));
@@ -1722,12 +1733,9 @@ fn namespaced_run(hello: &Program<'_>, module: &[u8]) -> KernelResult<()> {
         }
         Ok(())
     })();
-    mntns::release(ns);
-    // Its holds were the process's, given up at its teardown, and this one.
-    if ran.is_ok() && mntns::exists(ns) {
-        return Err(fail(
-            "the namespace outlived the process and its maker's hold",
-        ));
+    // Its one hold was the process's, given up at its teardown.
+    if ran.is_ok() && mntns::exists(id) {
+        return Err(fail("the namespace outlived the process it was handed to"));
     }
     if ran.is_ok() {
         serial_println!(

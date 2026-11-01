@@ -29893,19 +29893,21 @@ fn cmd_namespace(args: &str) {
     match parts.first().copied() {
         None | Some("list") => {
             shell_println!(
-                "{:<6} {:>9} {:>6} {:>7}",
+                "{:<6} {:>9} {:>6} {:>7} {:>6}",
                 "ID",
                 "Processes",
                 "Holds",
-                "Mounts"
+                "Mounts",
+                "Sealed"
             );
             for ns in mntns::list() {
                 shell_println!(
-                    "{:<6} {:>9} {:>6} {:>7}",
+                    "{:<6} {:>9} {:>6} {:>7} {:>6}",
                     ns.id,
                     ns.processes,
                     ns.holds,
-                    ns.mounts
+                    ns.mounts,
+                    if ns.sealed { "yes" } else { "no" }
                 );
             }
         }

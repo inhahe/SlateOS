@@ -34,14 +34,16 @@ printed in a log.
    for the join run alone (`linuxdrv::place_boot_wifi`), in a mount
    namespace of the joining driver's own, which the driver is started in
    before it runs an instruction (`linuxdrv::start_in`) and which no
-   process may enter, root included (`fs::mntns::seal`): no path from any
+   process may enter at any moment of its life, root included -- it is
+   sealed from its birth (`fs::mntns::create_sealed`): no path from any
    other namespace names it, whatever capability its process holds
-   (`fs::mntns::in_namespace` places it there). What the driver holds in
-   its memory -- the passphrase until it has parsed it, then the PMK -- a
-   process allowed to inspect it, root, could still read (known-issues
-   A-ROOT-CAN-READ-A-WIFI-DRIVERS-KEYS-FROM-ITS-MEMORY). Once the file is
-   dropped the driver goes back to the root namespace, and its own ends.
-   It detaches its mount the
+   (`fs::mntns::in_namespace` places it there). The namespace ends with the
+   driver, which holds it alone. A driver process is not dumpable, so no
+   other driver, all of which share its user, may read its memory; root
+   still may -- the passphrase until the driver has parsed it, then the
+   PMK -- and root runs beside it during the join: the netstack daemon
+   that checks the joined network (known-issues
+   A-ROOT-CAN-READ-A-WIFI-DRIVERS-KEYS-FROM-ITS-MEMORY). It detaches its mount the
    moment the joining process has served the card, or ended, or run out of
    time (`linuxdrv::drop_boot_wifi`) -- and again, in case, before init --
    so that no other process can read it, root's included, by any path,

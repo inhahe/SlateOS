@@ -72,20 +72,25 @@ static THREAD_OWNERS: Mutex<BTreeMap<TaskId, ProcessId>> =
 /// kernel's authority ([`as_kernel`]) and the mount namespace a task
 /// resolves its paths in (`fs::mntns::in_namespace`). Asked without a lock
 /// while no task holds one.
-pub(crate) struct TaskScoped<T: Copy + PartialEq + 'static> {
+pub(crate) struct TaskScoped<T: Copy + PartialEq + core::fmt::Debug + 'static> {
     /// Each task's innermost value. A leaf lock: nothing is called while it
     /// is held.
     held: Mutex<BTreeMap<TaskId, T>>,
-    /// How many tasks hold a value now.
+    /// How many tasks hold a value now: `held`'s length, stored under its
+    /// lock after every change, so the two never disagree.
     holders: core::sync::atomic::AtomicUsize,
+    /// What the values are, for a warning about one.
+    what: &'static str,
 }
 
-impl<T: Copy + PartialEq + 'static> TaskScoped<T> {
-    /// None held; `lock_name` names its lock in a deadlock report.
-    pub(crate) const fn new(lock_name: &'static [u8]) -> Self {
+impl<T: Copy + PartialEq + core::fmt::Debug + 'static> TaskScoped<T> {
+    /// None held: values that are `what`, their lock named `lock_name` in a
+    /// deadlock report.
+    pub(crate) const fn new(what: &'static str, lock_name: &'static [u8]) -> Self {
         Self {
             held: Mutex::named(BTreeMap::new(), lock_name),
             holders: core::sync::atomic::AtomicUsize::new(0),
+            what,
         }
     }
 
@@ -113,28 +118,24 @@ impl<T: Copy + PartialEq + 'static> TaskScoped<T> {
         let outer = {
             let mut held = self.held.lock();
             let outer = held.insert(task, value);
-            if outer.is_none() {
-                self.holders.fetch_add(1, Ordering::AcqRel);
-            }
+            self.holders.store(held.len(), Ordering::Release);
             outer
         };
         let result = body();
         let mut held = self.held.lock();
         let found = match outer {
             Some(outer) => held.insert(task, outer),
-            None => {
-                let found = held.remove(&task);
-                if found.is_some() {
-                    self.holders.fetch_sub(1, Ordering::AcqRel);
-                }
-                found
-            }
+            None => held.remove(&task),
         };
+        self.holders.store(held.len(), Ordering::Release);
         drop(held);
         if found != Some(value) {
             crate::serial_println!(
-                "[thread] WARNING: task {}'s scoped value was not where its call put it at the call's end: changed by something else",
-                task
+                "[thread] WARNING: task {}'s {} was not where its call put it at the call's end ({:?} found, {:?} put): changed by something else",
+                task,
+                self.what,
+                found,
+                value
             );
         }
         result
@@ -146,7 +147,7 @@ impl<T: Copy + PartialEq + 'static> TaskScoped<T> {
 // ---------------------------------------------------------------------------
 
 /// The tasks inside [`as_kernel`] now.
-static KERNEL_ACTING: TaskScoped<()> = TaskScoped::new(b"KACTING");
+static KERNEL_ACTING: TaskScoped<()> = TaskScoped::new("kernel authority", b"KACTING");
 
 /// The process a permission decision should treat `task` as acting for: the
 /// one it belongs to ([`owner_process`]), or none -- the kernel -- while it is

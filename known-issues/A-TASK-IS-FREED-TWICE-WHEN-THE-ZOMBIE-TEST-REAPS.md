@@ -44,6 +44,15 @@ bytes at the detector's mark to read as its signature, which
 `known-issues-resolved/A-PROC-VERSION-AND-LOADAVG-DOUBLE-FREE-A-256-BYTE-SLOT`
 made address-dependent to rule out.
 
+**Seen again, 2026-11-01 18:45 UTC**, at a05eedbb4 -- the next code
+commit, which sealed WiFi drivers against inspection and moved the netstack
+daemon off root -- with the same stack and another slot
+(`0xffff8001374a8800`): two builds fail, so it is not one binary's
+layout. The lead is 522cf381e..2c252e9a4, the third review follow-up of
+the WiFi namespace work (mntns `Held`/`Sealed`, `enter_process`, `leave`,
+`create`'s id order, the vfs detach self-test's hold), the only change
+between the last build that passed and the first that failed.
+
 **What is known of the cause.** It follows the binary's layout, not one
 change: the boot tests of 522cf381e passed this check, both of 2c252e9a4
 failed it (2026-11-01 03:31 and 03:55 UTC, the second log in

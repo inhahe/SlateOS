@@ -1678,9 +1678,9 @@ const NAMESPACED_DIR: &str = "/.linuxdrv-namespaced";
 /// "bootfw" run, its firmware -- `module`, the boot medium's bytes for it --
 /// placed in that namespace alone, sealed, beneath a tree it is given, and
 /// told where (`firmware_class.path`). The root's namespace must not reach
-/// the copy; the process must be in the namespace from its start, load the
-/// firmware from there and exit 0; and the namespace must go with its last
-/// holds, the process's given up as it ends. The run that QEMU can make of
+/// the copy; the process must be in the namespace from its start, not
+/// dumpable, load the firmware from there and exit 0; and the namespace
+/// must go with its one hold, the process's, given up as it ends. The run that QEMU can make of
 /// what the join does on the test PC.
 ///
 /// # Errors
@@ -1722,9 +1722,15 @@ fn namespaced_run(hello: &Program<'_>, module: &[u8]) -> KernelResult<()> {
         .map_err(|e| fail(&alloc::format!("it could not be started there ({e:?})")))?;
         // Still a member until its teardown, ended or not.
         let member = mntns::of_process(process.pid) == id;
+        let dumpable = pcb::get_dumpable(process.pid);
         let ended = finish(hello, &process);
         if !member {
             return Err(fail("it was not in the namespace it was started in"));
+        }
+        if dumpable != Some(0) {
+            return Err(fail(&alloc::format!(
+                "it was dumpable ({dumpable:?}): another driver process, of its user, could read its memory"
+            )));
         }
         if ended != Some(EXIT_OK) {
             return Err(fail(&alloc::format!(

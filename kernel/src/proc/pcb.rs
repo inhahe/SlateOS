@@ -2200,6 +2200,11 @@ pub fn fork_create(
     // The child has no thread yet, so nothing resolves a path for it before
     // this. `clone(CLONE_NEWNS)` moves it to a copy afterwards.
     crate::fs::mntns::inherit(parent_pid, pid);
+    // A copy of a sealed process's memory holds what the seal keeps: the
+    // child is sealed too, before it has a thread ([`seal_memory`]).
+    if is_memory_sealed(parent_pid) {
+        seal_memory(pid);
+    }
 
     // Bump the backing-file reference for each file-backed VMA the child
     // inherited.  Done with the process-table lock released — the open-file
@@ -4248,6 +4253,34 @@ pub fn set_nice(pid: ProcessId, nice: i32) -> Option<i32> {
     Some(old)
 }
 
+/// The processes sealed against inspection ([`seal_memory`]). A leaf lock.
+static MEMORY_SEALED: Mutex<alloc::collections::BTreeSet<ProcessId>> =
+    Mutex::named(alloc::collections::BTreeSet::new(), b"MEMSEAL");
+
+/// Process `pid` sealed against inspection: from here on no other process
+/// may read or change its memory or state through [`may_access`] --
+/// `process_vm_readv`/`writev`, `ptrace`, `/proc/<pid>/mem` and every other
+/// `/proc` file that asks -- whatever its identity, root's included, its
+/// capabilities, or the target's dumpable flag: the kernel and the process
+/// itself alone. For a process the kernel hands a secret of the system's
+/// (a WiFi driver holding its network's key, `linuxdrv::start_in`). Nothing
+/// clears it but the process's end; a fork's child is sealed too. Whether
+/// `pid` names a process to seal.
+pub fn seal_memory(pid: ProcessId) -> bool {
+    if PROCESS_TABLE.lock().contains_key(&pid) {
+        MEMORY_SEALED.lock().insert(pid);
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether process `pid` is sealed against inspection ([`seal_memory`]).
+#[must_use]
+pub fn is_memory_sealed(pid: ProcessId) -> bool {
+    MEMORY_SEALED.lock().contains(&pid)
+}
+
 /// Read the recorded `prctl(PR_SET_DUMPABLE)` flag for `pid`.
 ///
 /// Returns `None` if `pid` is unknown; `Some(1)` is the documented
@@ -4288,6 +4321,14 @@ pub fn may_access(reader: Option<ProcessId>, target: Option<ProcessId>, rights: 
     let Some(reader) = reader else {
         return true;
     };
+    // A process sealed against inspection is the kernel's and its own alone,
+    // whatever the reader's identity or capabilities ([`seal_memory`]).
+    if let Some(target) = target
+        && reader != target
+        && is_memory_sealed(target)
+    {
+        return false;
+    }
     let reader_creds = get_credentials(reader);
     let is_root = reader_creds
         .as_ref()
@@ -5609,6 +5650,9 @@ fn finish_process(pid: ProcessId, mut proc: Box<Process>) {
     // And on its mount namespace (`crate::fs::mntns`), whose table goes with
     // the last: no process-table lock is held here.
     crate::fs::mntns::process_gone(pid);
+    // Its seal against inspection, which a later process under its pid must
+    // not find.
+    MEMORY_SEALED.lock().remove(&pid);
     // A paused container's process that ends is no longer paused.
     crate::proc::freezer::on_process_exit(pid);
     // A program's lifecycle endpoint goes with it.

@@ -5507,9 +5507,27 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
     Ok(())
 }
 
+/// The user and group the netstack daemon runs as, wherever it is started
+/// ([`NETSTACK_IDENTITY`]): not root, since it parses what any host on the
+/// network sends it, and one taken over must be able to do nothing uid 0
+/// alone may -- read another process's memory (`pcb::may_access`), a WiFi
+/// driver's network key among them -- and hold only the capabilities it is
+/// given. Reserved for it in the rootfs's `/etc/passwd`
+/// (`requests/a-d-reserve-uid-65532-for-the-netstack-daemon.md`).
+pub const NETSTACK_UID: u32 = 65_532;
+/// [`NETSTACK_UID`]'s group.
+pub const NETSTACK_GID: u32 = 65_532;
+/// The netstack daemon's identity, for a spawn ([`NETSTACK_UID`]).
+pub const NETSTACK_IDENTITY: SpawnIdentity<'static> = SpawnIdentity {
+    uid: NETSTACK_UID,
+    gid: NETSTACK_GID,
+    groups: &[],
+};
+
 /// The userspace network-stack daemon (`services/netstack`, built for
 /// x86_64-unknown-none before the kernel), embedded at compile time: the
-/// netstack self-tests here and the Linux driver layer's (`linuxdrv`) run it.
+/// netstack self-tests here and the Linux driver layer's (`linuxdrv`) run it,
+/// always as [`NETSTACK_IDENTITY`].
 pub(crate) static NETSTACK_ELF: &[u8] =
     include_bytes!("../../../services/netstack/target/x86_64-unknown-none/release/netstack");
 
@@ -5562,7 +5580,7 @@ pub fn self_test_userspace_netstack() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
-        identity: None,
+        identity: Some(NETSTACK_IDENTITY),
     };
 
     let result = match spawn_process(NETSTACK_ELF, &options) {
@@ -5661,7 +5679,7 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
-        identity: None,
+        identity: Some(NETSTACK_IDENTITY),
     };
 
     let result = match spawn_process(NETSTACK_ELF, &options) {
@@ -6115,7 +6133,7 @@ pub fn run_persistent_netstack(card: Option<&str>) -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
-        identity: None,
+        identity: Some(NETSTACK_IDENTITY),
     };
 
     let result = match spawn_process(NETSTACK_ELF, &options) {

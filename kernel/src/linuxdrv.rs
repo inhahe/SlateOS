@@ -122,26 +122,31 @@ fn start(
     start_in(program, argv, capabilities, None)
 }
 
-/// [`start`], the process in mount namespace `ns` from its first
-/// instruction where one is given -- the caller's hold on it handed to the
-/// process, so that the namespace ends with the process, a mount table that
-/// keeps every path lookup on the machine uncached while it exists
-/// (`fs::Vfs::copy_mount_table`) -- and checked not to be root before it
-/// runs one. A driver process is not dumpable (`PR_SET_DUMPABLE` 0): no
-/// other process of its user, which every driver process shares, may
-/// inspect it.
+/// [`start`], the process in sealed mount namespace `ns` from its first
+/// instruction where one is given -- one the kernel placed a secret in for
+/// it -- the caller's hold on it handed to the process, so that the
+/// namespace ends with the process, a mount table that keeps every path
+/// lookup on the machine uncached while it exists
+/// (`fs::Vfs::copy_mount_table`); such a process is sealed against
+/// inspection (`pcb::seal_memory`): no other process may read its memory,
+/// root included, unless the boot says [`INSPECTABLE_WORD`]`=1`. Checked
+/// not to be root before it runs an instruction. A driver process is not
+/// dumpable (`PR_SET_DUMPABLE` 0): no other process of its user, which
+/// every driver process shares, may inspect it. The netstack daemon runs as
+/// its own user (`spawn::NETSTACK_IDENTITY`).
 ///
 /// # Errors
 ///
 /// The spawn's; `InternalError`, said, for a driver process that would be
-/// root all the same, or that could not be made undumpable;
+/// root all the same -- or the netstack daemon, which never runs as root
+/// either -- or that could not be made undumpable, or sealed;
 /// [`crate::fs::mntns::Held::give_to`]'s. Nothing of the process is left
 /// after any, and `ns`'s hold given up.
 fn start_in(
     program: &Program<'_>,
     argv: &[&[u8]],
     capabilities: &[(ResourceType, u64, Rights)],
-    ns: Option<crate::fs::mntns::Held>,
+    ns: Option<crate::fs::mntns::Sealed>,
 ) -> KernelResult<spawn::SpawnResult> {
     const PATH_KEY: &[u8] = b"firmware_class.path=";
     // Outlives `args`, which borrows it; made only when it is passed.
@@ -164,10 +169,16 @@ fn start_in(
         envp: &[],
         exe_path: None,
         cwd: None,
-        identity: program.driver.then_some(spawn::SpawnIdentity {
-            uid: DRIVER_UID,
-            gid: DRIVER_GID,
-            groups: &[],
+        // Never root: a driver process as its user, the netstack daemon as
+        // its own.
+        identity: Some(if program.driver {
+            spawn::SpawnIdentity {
+                uid: DRIVER_UID,
+                gid: DRIVER_GID,
+                groups: &[],
+            }
+        } else {
+            spawn::NETSTACK_IDENTITY
         }),
     };
     // Unstarted, and undone if dropped so: every refusal below leaves nothing.
@@ -187,9 +198,9 @@ fn start_in(
             || [c.gid, c.rgid, c.sgid, c.fsgid].contains(&0)
             || c.groups.contains(&0)
     };
-    if program.driver && pcb::get_credentials(process.pid()).is_none_or(root) {
+    if pcb::get_credentials(process.pid()).is_none_or(root) {
         serial_println!(
-            "[linuxdrv]   FAIL: the driver process {} (pid {}) would run as root",
+            "[linuxdrv]   FAIL: the {} process (pid {}) would run as root",
             program.name,
             process.pid()
         );
@@ -204,10 +215,38 @@ fn start_in(
         return Err(KernelError::InternalError);
     }
     if let Some(ns) = ns {
+        // A process the kernel places a secret for, in a namespace of its
+        // own: no other process may inspect it, root included -- unless the
+        // boot asks for such processes to be debuggable, said.
+        if inspectable() {
+            serial_println!(
+                "[linuxdrv] WARNING: {INSPECTABLE_WORD}=1: the {} process (pid {}), which the kernel hands a secret, is left inspectable -- root, and any process with the capability, may read its memory",
+                program.name,
+                process.pid()
+            );
+        } else if !pcb::seal_memory(process.pid()) {
+            serial_println!(
+                "[linuxdrv]   FAIL: the {} process (pid {}), which the kernel hands a secret, could not be sealed against inspection",
+                program.name,
+                process.pid()
+            );
+            return Err(KernelError::InternalError);
+        }
         // The process's own from here on: its end gives it up.
-        ns.give_to(process.pid())?;
+        ns.into_held().give_to(process.pid())?;
     }
     process.start()
+}
+
+/// The kernel command line's word that leaves a driver process the kernel
+/// hands a secret inspectable ([`start_in`]), `=1`: for debugging such a
+/// driver with root's tools, at the price of the secret.
+const INSPECTABLE_WORD: &str = "linuxdrv.inspectable";
+
+/// Whether the boot asks for driver processes holding a secret to be left
+/// inspectable ([`INSPECTABLE_WORD`]).
+fn inspectable() -> bool {
+    crate::fs::kernparam::get(INSPECTABLE_WORD).is_some_and(|v| v == "1")
 }
 
 /// How `process`, started from `program`, ended within `program`'s limit
@@ -682,7 +721,7 @@ fn wifi_join_run(
             b"stacks=2",
         ],
         &caps,
-        Some(ns.into_held()),
+        Some(ns),
     )?;
     let fail = |what: &str, driver: &spawn::SpawnResult| {
         let ended = stop(driver);
@@ -1683,8 +1722,9 @@ const NAMESPACED_DIR: &str = "/.linuxdrv-namespaced";
 /// placed in that namespace alone, sealed, beneath a tree it is given, and
 /// told where (`firmware_class.path`). The root's namespace must not reach
 /// the copy; the process must be in the namespace from its start, not
-/// dumpable, load the firmware from there and exit 0; and the namespace
-/// must go with its one hold, the process's, given up as it ends. The run that QEMU can make of
+/// dumpable, sealed against inspection -- a root process may not inspect it
+/// ([`root_reader`]) -- load the firmware from there and exit 0; and the
+/// namespace must go with its one hold, the process's, given up as it ends. The run that QEMU can make of
 /// what the join does on the test PC.
 ///
 /// # Errors
@@ -1722,15 +1762,34 @@ fn namespaced_run(hello: &Program<'_>, module: &[u8]) -> KernelResult<()> {
             hello,
             &[b"hello", b"bootfw", path_arg.as_bytes()],
             &[(ResourceType::FileTree, tree, Rights::READ)],
-            Some(ns.into_held()),
+            Some(ns),
         )
         .map_err(|e| fail(&alloc::format!("it could not be started there ({e:?})")))?;
         // Still a member until its teardown, ended or not.
         let member = mntns::of_process(process.pid) == id;
         let dumpable = pcb::get_dumpable(process.pid);
+        let sealed = pcb::is_memory_sealed(process.pid);
+        // A root process, made and never started, as a reader: the seal
+        // must refuse it what its identity alone would be granted.
+        let root_refused = root_reader(hello).map(|reader| {
+            let is_root = pcb::get_credentials(reader.pid()).is_some_and(|c| c.is_root());
+            (
+                is_root,
+                !pcb::may_inspect(Some(reader.pid()), Some(process.pid)),
+            )
+        });
         let ended = finish(hello, &process);
         if !member {
             return Err(fail("it was not in the namespace it was started in"));
+        }
+        if inspectable() {
+            serial_println!(
+                "[linuxdrv]   {INSPECTABLE_WORD}=1: the seal against inspection is not checked"
+            );
+        } else if !sealed || root_refused != Ok((true, true)) {
+            return Err(fail(&alloc::format!(
+                "it was sealed against inspection: {sealed}; a root process reading it -- (is root, refused) -- {root_refused:?}"
+            )));
         }
         if dumpable != Some(0) {
             return Err(fail(&alloc::format!(
@@ -1754,6 +1813,37 @@ fn namespaced_run(hello: &Program<'_>, module: &[u8]) -> KernelResult<()> {
         );
     }
     ran
+}
+
+/// A root process of `program`'s, made and never started: one whose
+/// identity alone lets it inspect any other process that is not sealed
+/// against inspection ([`namespaced_run`]). Undone as it drops.
+///
+/// # Errors
+///
+/// The spawn's.
+fn root_reader(program: &Program<'_>) -> KernelResult<spawn::SuspendedSpawn> {
+    let options = spawn::SpawnOptions {
+        name: "root-reader",
+        parent: 0,
+        priority: crate::sched::task::DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv: &[b"hello"],
+        envp: &[],
+        exe_path: None,
+        cwd: None,
+        // The kernel's own: root.
+        identity: None,
+    };
+    spawn::spawn_process_suspended(
+        program.elf,
+        &options,
+        None,
+        &[],
+        spawn::CapInherit::All,
+        spawn::SpawnAttrs::default(),
+    )
 }
 
 /// Where [`boot_firmware_run`] puts a sealed directory of firmware other

@@ -42,12 +42,15 @@ printed in a log.
    last of the driver, any child of it, and any handle a process opened on
    it (`/proc/<pid>/ns/mnt`, which holds it without entering it); while it
    lasts, the path cache stands aside (known-issues
-   A-PATH-CACHE-STANDS-ASIDE-WHILE-MOUNT-NAMESPACES-EXIST). A driver
-   process is not dumpable, so no other driver, all of which share its
-   user, may read its memory; root still may -- the passphrase until the
-   driver has parsed it, then the PMK -- and root runs beside it during the
-   join: the netstack daemon that checks the joined network (known-issues
-   A-ROOT-CAN-READ-A-WIFI-DRIVERS-KEYS-FROM-ITS-MEMORY). The kernel detaches
+   A-PATH-CACHE-STANDS-ASIDE-WHILE-MOUNT-NAMESPACES-EXIST). Nor may
+   any other process read what the driver holds in its memory -- the
+   passphrase until it has parsed it, then the PMK: it is sealed against
+   inspection (`pcb::seal_memory`), root and capability holders included,
+   unless the kernel command line says `linuxdrv.inspectable=1` for
+   debugging it (the operator's choice, 2026-11-01, known-issues
+   A-ROOT-CAN-READ-A-WIFI-DRIVERS-KEYS-FROM-ITS-MEMORY); and the netstack
+   daemon that checks the joined network beside it runs as a user of its
+   own, not root. The kernel detaches
    the file's mount the moment the joining process has served the card,
    or ended, or run out of time (`linuxdrv::drop_boot_wifi`) -- and again,
    in case, before init -- from every namespace it is mounted in, so that

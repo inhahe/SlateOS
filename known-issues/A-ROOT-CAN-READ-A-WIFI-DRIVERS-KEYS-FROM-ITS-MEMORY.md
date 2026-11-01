@@ -1,6 +1,17 @@
 ## A-ROOT-CAN-READ-A-WIFI-DRIVERS-KEYS-FROM-ITS-MEMORY (lane A, 2026-10-31) — OPEN
 
-**Status:** OPEN
+**Status:** OPEN -- fixed on lane-a-wip, awaiting a boot on main: the
+operator chose (2026-11-01) the narrow fix and the seal both. The netstack
+daemon runs as its own user, uid 65532, everywhere it is started
+(`spawn::NETSTACK_IDENTITY`; `requests/a-d-reserve-uid-65532-for-the-netstack-daemon.md`).
+A process the kernel hands a secret -- one it starts in a sealed mount
+namespace, the WiFi joining driver -- is sealed against inspection
+(`pcb::seal_memory`): `pcb::may_access` refuses every reader but the
+kernel and the process itself, root and capability holders included, and a
+fork's child is sealed too. `linuxdrv.inspectable=1` on the kernel command
+line leaves such a process inspectable, said, for debugging it.
+`linuxdrv::namespaced_run` checks the seal in every boot test, with a root
+process as the reader.
 
 **In short:** the WiFi network file is now out of every other process's
 reach while it is placed: it is in a mount namespace of the joining

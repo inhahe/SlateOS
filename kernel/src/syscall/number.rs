@@ -7114,7 +7114,11 @@ pub const SYS_NAMESPACE_OPEN: u64 = 1162;
 ///
 /// `InvalidHandle` for a handle the caller does not hold; `InvalidArgument`
 /// for a kind that is not the handle's; `PermissionDenied` without a
-/// `Namespace` capability with `WRITE`.
+/// `Namespace` capability with `WRITE`; `NotPermitted` for a mount
+/// namespace the kernel sealed (`fs::mntns::create_sealed` -- one it placed
+/// a process's secret in), whatever capability or identity the caller
+/// holds; `NotFound` for a namespace that went with its last holder
+/// meanwhile.
 pub const SYS_NAMESPACE_ENTER: u64 = 1163;
 
 /// `SYS_NAMESPACE_ENTER_PROCESS` (1164) -- the caller's process into the
@@ -7122,7 +7126,10 @@ pub const SYS_NAMESPACE_ENTER: u64 = 1163;
 /// bits: the native `setns(2)` with a pidfd. `InvalidArgument` for no bit,
 /// `NotSupported` for a kind not built; `NoSuchProcess` for a process that
 /// is gone or a zombie; `PermissionDenied` if the caller may not inspect it
-/// or holds no `Namespace` capability with `WRITE`.
+/// or holds no `Namespace` capability with `WRITE`; `NotPermitted` when the
+/// process's mount namespace is one the kernel sealed, whatever the caller
+/// holds, as [`SYS_NAMESPACE_ENTER`]; `NotFound` for a namespace that went
+/// with its last holder meanwhile.
 pub const SYS_NAMESPACE_ENTER_PROCESS: u64 = 1164;
 
 /// `SYS_NAMESPACE_CLOSE` (1165) -- give back namespace handle `arg0` (one

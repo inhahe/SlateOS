@@ -29,3 +29,11 @@ switch goes.
 **Measure first.** `bench.rs`'s `vfs_resolve_*` figures with a mount
 namespace alive show what the switch costs; worth doing when containers use
 mount namespaces routinely.
+
+**A kernel user, 2026-10-31.** A WiFi driver joining the network the boot
+medium names runs in a sealed mount namespace of its own, which holds the
+network file while it is placed (design-decisions 1596,
+`linuxdrv::start_in`): the cache stands aside from the driver's start to its
+end. In the boot's join that is the length of the join run, a few minutes;
+a WiFi driver serving for the system's life would keep it aside for the
+uptime, which makes this the trigger for the fix above.

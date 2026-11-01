@@ -140,7 +140,7 @@ pub fn unshare(pid: crate::proc::pcb::ProcessId, kind: NsKind) -> KernelResult<(
 /// # Errors
 ///
 /// `NotPermitted` (`EPERM`) for a mount namespace the kernel sealed
-/// (`fs::mntns::seal`), whatever authority the caller holds; `NotFound` if
+/// (`fs::mntns::create_sealed`), whatever authority the caller holds; `NotFound` if
 /// the namespace went with its last holder meanwhile (a handle closed by
 /// another thread, the process a pidfd names leaving it); `NoSuchProcess`,
 /// nothing kept for it.

@@ -134,8 +134,9 @@ fn start(
 /// # Errors
 ///
 /// The spawn's; `InternalError`, said, for a driver process that would be
-/// root all the same. Nothing of the process is left after any, and `ns`'s
-/// hold given up.
+/// root all the same, or that could not be made undumpable;
+/// [`crate::fs::mntns::Held::give_to`]'s. Nothing of the process is left
+/// after any, and `ns`'s hold given up.
 fn start_in(
     program: &Program<'_>,
     argv: &[&[u8]],
@@ -204,7 +205,7 @@ fn start_in(
     }
     if let Some(ns) = ns {
         // The process's own from here on: its end gives it up.
-        ns.give_to(process.pid());
+        ns.give_to(process.pid())?;
     }
     process.start()
 }
@@ -650,7 +651,7 @@ fn wifi_join_run(
     pci: &str,
     capabilities: &[(ResourceType, u64, Rights)],
     network: (ResourceType, u64, Rights),
-    ns: crate::fs::mntns::Held,
+    ns: crate::fs::mntns::Sealed,
 ) -> KernelResult<()> {
     /// How long firmware, a scan and a join may take before the card is
     /// served: the driver process's own worst case, which it says the end
@@ -681,7 +682,7 @@ fn wifi_join_run(
             b"stacks=2",
         ],
         &caps,
-        Some(ns),
+        Some(ns.into_held()),
     )?;
     let fail = |what: &str, driver: &spawn::SpawnResult| {
         let ended = stop(driver);
@@ -1091,10 +1092,12 @@ pub fn note_boot_wifi() -> bool {
 ///
 /// `NotFound` when there is no network file to place: the boot medium
 /// carries none ([`note_boot_wifi`]), or it was wiped already
-/// ([`drop_boot_wifi`]), or `ns` is gone. [`mount_boot_files`]', or the
-/// tree registry's, said: a directory placed and not a tree is the kernel's
-/// own fault. What was mounted stays for [`drop_boot_wifi`] to take away.
-fn place_boot_wifi(ns: &crate::fs::mntns::Held) -> KernelResult<(ResourceType, u64, Rights)> {
+/// ([`drop_boot_wifi`]). `InternalError`, said, nothing placed, for a
+/// namespace that is not sealed after all or that another holds -- one a
+/// process is in or a handle is open on. [`mount_boot_files`]', or the tree
+/// registry's, said: a directory placed and not a tree is the kernel's own
+/// fault. What was mounted stays for [`drop_boot_wifi`] to take away.
+fn place_boot_wifi(ns: &crate::fs::mntns::Sealed) -> KernelResult<(ResourceType, u64, Rights)> {
     use crate::fs::mntns;
     if !BOOT_WIFI_CARRIED.load(core::sync::atomic::Ordering::Acquire) {
         return Err(KernelError::NotFound);
@@ -1102,12 +1105,13 @@ fn place_boot_wifi(ns: &crate::fs::mntns::Held) -> KernelResult<(ResourceType, u
     // Only where no process may enter, root's included -- which could
     // otherwise read the file by its path from inside -- and where none
     // is, or holds a handle on it: the namespace is the caller's alone.
+    // Sealed from its birth, as its type says; and checked, as what the
+    // passphrase's secrecy rests on.
     let id = ns.id();
-    if !mntns::is_sealed(id) || mntns::holds(id) != 1 {
+    let (sealed, holds) = (mntns::is_sealed(id), mntns::holds(id));
+    if !sealed || holds != 1 {
         serial_println!(
-            "[linuxdrv]   FAIL: the WiFi network file was to be placed in mount namespace {id}, which is not sealed ({}) or held by others ({} hold(s)): it is not placed",
-            mntns::is_sealed(id),
-            mntns::holds(id)
+            "[linuxdrv]   FAIL: the WiFi network file was to be placed in mount namespace {id}, which is not sealed ({sealed}) or held by others ({holds} hold(s)): it is not placed"
         );
         return Err(KernelError::InternalError);
     }
@@ -1121,8 +1125,8 @@ fn place_boot_wifi(ns: &crate::fs::mntns::Held) -> KernelResult<(ResourceType, u
 ///
 /// # Errors
 ///
-/// [`crate::fs::mntns::create_from`]'s, said.
-fn driver_namespace(what: &str) -> KernelResult<crate::fs::mntns::Held> {
+/// [`crate::fs::mntns::create_sealed`]'s, said.
+fn driver_namespace(what: &str) -> KernelResult<crate::fs::mntns::Sealed> {
     crate::fs::mntns::create_sealed().inspect_err(|e| {
         serial_println!(
             "[linuxdrv]   FAIL: no mount namespace could be made for {what} ({e:?}): it is not placed"
@@ -1695,7 +1699,8 @@ fn namespaced_run(hello: &Program<'_>, module: &[u8]) -> KernelResult<()> {
         );
         KernelError::InternalError
     };
-    let ns = driver_namespace("a driver process's firmware")?;
+    let ns = driver_namespace("a driver process's firmware")
+        .map_err(|e| fail(&alloc::format!("no namespace could be made for it ({e:?})")))?;
     let id = ns.id();
     let ran = (|| {
         let tree = mntns::in_namespace(id, || {
@@ -1717,7 +1722,7 @@ fn namespaced_run(hello: &Program<'_>, module: &[u8]) -> KernelResult<()> {
             hello,
             &[b"hello", b"bootfw", path_arg.as_bytes()],
             &[(ResourceType::FileTree, tree, Rights::READ)],
-            Some(ns),
+            Some(ns.into_held()),
         )
         .map_err(|e| fail(&alloc::format!("it could not be started there ({e:?})")))?;
         // Still a member until its teardown, ended or not.

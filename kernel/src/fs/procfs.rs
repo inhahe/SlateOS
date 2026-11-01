@@ -4353,7 +4353,7 @@ fn gen_overlays() -> Vec<u8> {
 
 /// Generate `/proc/namespaces` — the mount namespaces (`fs::mntns`): each
 /// one's id, the processes in it, the holds on it, its mounts, and whether
-/// no process may enter it (`fs::mntns::seal`).
+/// no process may enter it (`fs::mntns::create_sealed`).
 fn gen_namespaces() -> Vec<u8> {
     let nss = crate::fs::mntns::list();
     let mut s = String::with_capacity(512);

@@ -17525,8 +17525,8 @@ fn detach_test_everywhere() -> Result<(), &'static str> {
         MountOptions::defaults(),
     )
     .map_err(|_| "a memfs could not be stacked on it")?;
-    let ns =
-        super::mntns::create_from(super::mntns::ROOT).map_err(|_| "no namespace could be made")?;
+    let ns = super::mntns::create_held_from(super::mntns::ROOT)
+        .map_err(|_| "no namespace could be made")?;
     let detached = Vfs::detach_filesystem(fs_id);
     let after = (
         Vfs::filesystem_mounted(fs_id),
@@ -17535,7 +17535,7 @@ fn detach_test_everywhere() -> Result<(), &'static str> {
         Vfs::is_mount_point(b),
         Vfs::object_read(&hold, &held_path, 0, 4),
     );
-    super::mntns::release(ns);
+    drop(ns);
     drop(hold);
     match (detached, after) {
         (Ok(6), (false, Err(KernelError::NotFound), false, false, Ok(read))) if read == b"held" => {

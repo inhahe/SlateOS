@@ -37,17 +37,22 @@ printed in a log.
    process may enter at any moment of its life, root included -- it is
    sealed from its birth (`fs::mntns::create_sealed`): no path from any
    other namespace names it, whatever capability its process holds
-   (`fs::mntns::in_namespace` places it there). The namespace ends with the
-   driver, which holds it alone. A driver process is not dumpable, so no
-   other driver, all of which share its user, may read its memory; root
-   still may -- the passphrase until the driver has parsed it, then the
-   PMK -- and root runs beside it during the join: the netstack daemon
-   that checks the joined network (known-issues
-   A-ROOT-CAN-READ-A-WIFI-DRIVERS-KEYS-FROM-ITS-MEMORY). It detaches its mount the
-   moment the joining process has served the card, or ended, or run out of
-   time (`linuxdrv::drop_boot_wifi`) -- and again, in case, before init --
-   so that no other process can read it, root's included, by any path,
-   bind mount or syscall. Until 2026-10-31 it was placed in the root
+   (`fs::mntns::in_namespace` places it there). The kernel hands its one
+   hold on the namespace to the driver, so the namespace ends with the
+   last of the driver, any child of it, and any handle a process opened on
+   it (`/proc/<pid>/ns/mnt`, which holds it without entering it); while it
+   lasts, the path cache stands aside (known-issues
+   A-PATH-CACHE-STANDS-ASIDE-WHILE-MOUNT-NAMESPACES-EXIST). A driver
+   process is not dumpable, so no other driver, all of which share its
+   user, may read its memory; root still may -- the passphrase until the
+   driver has parsed it, then the PMK -- and root runs beside it during the
+   join: the netstack daemon that checks the joined network (known-issues
+   A-ROOT-CAN-READ-A-WIFI-DRIVERS-KEYS-FROM-ITS-MEMORY). The kernel detaches
+   the file's mount the moment the joining process has served the card,
+   or ended, or run out of time (`linuxdrv::drop_boot_wifi`) -- and again,
+   in case, before init -- from every namespace it is mounted in, so that
+   no other process can read it, root's included, by any path, bind mount
+   or syscall. Until 2026-10-31 it was placed in the root
    namespace, where a process holding the general `File` capability could
    have read it while it was there (known-issues
    A-THE-WIFI-FILE-IS-IN-THE-ROOT-NAMESPACE-WHILE-PLACED, fixed on lane A, pending a boot on main). A driver started for the system's

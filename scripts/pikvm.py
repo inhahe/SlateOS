@@ -7,7 +7,8 @@ USB drive, and works its power button. This script is how a session drives it:
 
     python scripts/pikvm.py status
     python scripts/pikvm.py stage <worktree> -o <img> [--cmdline "..."] [--add-cmdline "..."] [--no-linuxdrv] [--wifi FILE]
-    python scripts/pikvm.py boot <img> [--off-hard]  # shut down, upload, start, pick it at F12
+    python scripts/pikvm.py boot <img> [--off-hard] [--serial]  # shut down, upload, start, pick it at F12
+    python scripts/pikvm.py serial start|stop|fetch [<out>]  # the serial line, kept on the PiKVM
     python scripts/pikvm.py watch --seconds 90  # screenshots until the screen settles
     python scripts/pikvm.py snap <out.png> [--crop X0,Y0,X1,Y1]
     python scripts/pikvm.py power on|off|off-hard|reset-hard
@@ -15,14 +16,12 @@ USB drive, and works its power button. This script is how a session drives it:
 `boot` checks first that the image can be uploaded -- it reads, the PiKVM
 answers, and has room for it -- then shuts a PC that is on down, with a
 press of its power button, and goes on once the power light is out. A press shuts Windows down
-properly (Windows' power button setting, since 2026-10-31). It stops
-SlateOS too, which handles no power-button event yet, most likely by the
-firmware powering the PC off (known-issues
-A-THE-POWER-BUTTON-NEVER-REACHES-THE-KERNEL, which says what is not yet
-explained): a power cut as far as SlateOS knows, which loses nothing, since
-it may write only the spare disk. `--off-hard` cuts the power at once (the button
+properly (Windows' power button setting, since 2026-10-31), and SlateOS too:
+the kernel takes the button from the firmware and shuts down in order
+(design-decisions 1597). `--off-hard` cuts the power at once (the button
 held down), for a PC a press does not stop -- never for Windows, which
-would lose what is open.
+would lose what is open. `--serial` starts a fresh capture of the serial line
+just before the PC (below).
 
 `stage` builds the USB image from a worktree's built kernel: Limine, the kernel
 (debug info stripped), the Linux driver processes -- built first, as the boot
@@ -30,7 +29,8 @@ test builds them, so that none older than the tree is staged -- as Limine
 modules, and `limine.conf` with the command line on its first entry. The
 default command line names the PC's spare disk as the only one the kernel may
 write (`blk.writable=`, design-decisions 1575) and puts the kernel's log on the
-screen (`log.screen=1`), which is the only log there is; `--add-cmdline` adds
+screen (`log.screen=1`); `--add-cmdline "log.pci_serial=1"` sends the whole log
+to the PC's serial card as well, for `boot --serial` to keep; `--add-cmdline` adds
 to it, `--cmdline` replaces it. For the Linux e1000e run on the PC's I219-V,
 add `linuxdrv.card=00:1f.6`; for Linux's mt7925e on its RZ717 WiFi card, which
 scans and says the networks it finds, `linuxdrv.wifi=06:00.0` (and
@@ -46,6 +46,14 @@ The PiKVM's address and login are read from `~/.pikvm` -- JSON with `url`,
 `user`, `password` and, for `boot`, `boot_entry_xy`: where on the screen the
 firmware's boot menu shows the PiKVM drive -- or from PIKVM_URL, PIKVM_USER and
 PIKVM_PASSWORD. They never go into this repository.
+
+`serial` works the PiKVM's own shell, over SSH as root with the key
+`~/.pikvm`'s `ssh_key` names (default `~/.ssh/pikvm_ed25519`, its public half
+in the PiKVM's `/root/.ssh/authorized_keys`): `start` begins a capture of
+its serial adapter (`/dev/ttyUSB0`, an FTDI FT232R wired to the PC's serial
+card) at 115200 8N1 into the PiKVM's `/tmp` -- running there, apart from the
+session, until `stop` or the next start -- and `fetch` copies it here
+(`build/pikvm-serial.log` unless named).
 
 Typing (`type`) translates text for the keyboard layout Windows uses on the
 PC, US Dvorak (`--layout us` for QWERTY): the PiKVM sends physical keys.
@@ -276,6 +284,7 @@ class PiKvm:
                      "or set PIKVM_URL, PIKVM_USER, PIKVM_PASSWORD")
         self.headers = {"X-KVMD-User": user, "X-KVMD-Passwd": password}
         self.boot_entry_xy = cfg.get("boot_entry_xy")
+        self.ssh_key = Path(cfg["ssh_key"]) if cfg.get("ssh_key") else None
         # The PiKVM's certificate is its own, self-signed.
         self.ctx = ssl.create_default_context()
         self.ctx.check_hostname = False
@@ -610,6 +619,80 @@ SHUTDOWN_SECONDS = 180
 OFF_HARD_SECONDS = 15
 
 
+#: The PiKVM's serial adapter (an FTDI FT232R on its USB, wired to the test
+#: PC's PCIe serial card), the speed the kernel's log comes at
+#: (`log.pci_serial=`, bare-metal-boot.md), and where a capture of it is kept
+#: on the PiKVM -- its /tmp, which is RAM: gone when the PiKVM restarts.
+SERIAL_DEVICE = "/dev/ttyUSB0"
+SERIAL_BAUD = 115200
+SERIAL_LOG = "/tmp/slateos-serial.log"
+SERIAL_PID = "/tmp/slateos-serial.pid"
+
+
+class PiKvmShell:
+    """The PiKVM's own shell, as root over SSH with the key `~/.pikvm` names
+    (`ssh_key`, default `~/.ssh/pikvm_ed25519`): for what kvmd's API does
+    not do, the serial capture."""
+
+    def __init__(self, url: str, key: Path | None = None) -> None:
+        self.host = urllib.parse.urlparse(url).hostname or ""
+        self.key = key or Path.home() / ".ssh" / "pikvm_ed25519"
+
+    def run(self, command: str, timeout: float = 30) -> bytes:
+        """`command` run by the PiKVM's shell: what it wrote to its standard
+        output. Its failure -- a status other than 0 -- ends the program,
+        with what it wrote to its standard error."""
+        done = subprocess.run(
+            ["ssh", "-i", str(self.key), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+             f"root@{self.host}", command],
+            capture_output=True, timeout=timeout)
+        if done.returncode != 0:
+            sys.exit(f"pikvm: on the PiKVM, `{command.splitlines()[0]}` failed "
+                     f"({done.returncode}): {done.stderr.decode('utf-8', 'replace').strip()}")
+        return done.stdout
+
+
+def serial_start(shell) -> None:
+    """A fresh capture of the serial adapter started on the PiKVM, running
+    apart from this program -- it goes on after this returns, and after
+    the SSH session ends -- until [`serial_stop`] or the next start: any
+    capture before it stopped, the log emptied, the adapter set to
+    [`SERIAL_BAUD`] 8N1, raw, no flow control."""
+    shell.run(serial_start_script())
+    print(f"pikvm: capturing {SERIAL_DEVICE} at {SERIAL_BAUD} baud into {SERIAL_LOG} on the PiKVM")
+
+
+def serial_start_script() -> str:
+    """The PiKVM's shell script [`serial_start`] runs: a statement a line,
+    so that the reader alone runs in the background -- `a && b & c` would put
+    the whole of `a && b` there, holding the SSH session open and leaving
+    the subshell's pid, not the reader's -- with every one of its streams
+    away from the session."""
+    return "\n".join([
+        f'[ -f {SERIAL_PID} ] && kill "$(cat {SERIAL_PID})" 2>/dev/null',
+        f"stty -F {SERIAL_DEVICE} {SERIAL_BAUD} cs8 -cstopb -parenb raw -echo "
+        f"-ixon -ixoff -crtscts clocal || exit 1",
+        f": > {SERIAL_LOG}",
+        f"nohup cat {SERIAL_DEVICE} >> {SERIAL_LOG} 2>/dev/null </dev/null &",
+        f"echo $! > {SERIAL_PID}",
+    ])
+
+
+def serial_stop(shell) -> None:
+    """The capture [`serial_start`] began, stopped; its log kept."""
+    shell.run(f'[ -f {SERIAL_PID} ] && kill "$(cat {SERIAL_PID})" 2>/dev/null; rm -f {SERIAL_PID}')
+    print("pikvm: the serial capture stopped")
+
+
+def serial_fetch(shell, out: Path) -> int:
+    """The capture so far copied to `out`, as the bytes came: how many."""
+    data = shell.run(f"cat {SERIAL_LOG}", timeout=120)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(data)
+    print(f"pikvm: {len(data)} byte(s) of the serial capture written to {out}")
+    return len(data)
+
+
 def storage_room(msd: dict) -> int | None:
     """The bytes an upload of this script's image may take on the PiKVM's
     storage, from kvmd's /api/msd answer `msd`: what is free, and what its
@@ -676,7 +759,7 @@ def shut_down(kvm, off_hard: bool, wait_s: float | None = None) -> None:
     print("pikvm: the PC is off", flush=True)
 
 
-def boot(kvm: PiKvm, image: Path, menu_key: str, off_hard: bool) -> None:
+def boot(kvm: PiKvm, image: Path, menu_key: str, off_hard: bool, serial=None) -> None:
     """Check that `image` can be uploaded ([`check_upload`]), shut the PC
     down ([`shut_down`]; `off_hard` cuts its power), upload `image` -- the
     drive taken from the PC only once nothing runs there to lose it -- start
@@ -685,7 +768,9 @@ def boot(kvm: PiKvm, image: Path, menu_key: str, off_hard: bool) -> None:
     as pictures allow: one the menu does not take (the screen unchanged) is
     made again. A screen that changes is taken for the boot starting --
     which it may not be, if what settled was a logo before the menu; `watch`
-    or `snap` shows which."""
+    or `snap` shows which. With `serial`, the PiKVM's shell, a fresh serial
+    capture is started just before the PC is, so that it holds the kernel's
+    log from its first line ([`serial_start`]; [`serial_fetch`] copies it)."""
     if not kvm.boot_entry_xy:
         sys.exit("pikvm: boot needs boot_entry_xy in ~/.pikvm: where the boot menu shows the PiKVM drive")
     check_upload(kvm, image)
@@ -697,6 +782,8 @@ def boot(kvm: PiKvm, image: Path, menu_key: str, off_hard: bool) -> None:
               "(boot again, or `power on`)", file=sys.stderr)
         raise
     time.sleep(2)
+    if serial is not None:
+        serial_start(serial)
     kvm.power("on")
     for _ in range(MENU_KEY_SECONDS * 4):
         kvm.key(menu_key)
@@ -1049,6 +1136,7 @@ def self_test() -> int:
         pass
     self_test_requests(check)
     self_test_screens(check)
+    self_test_serial(check)
     for f in failures:
         print("FAIL", f)
     print("pikvm self-test:", "FAILED" if failures else "passed")
@@ -1189,6 +1277,46 @@ def self_test_requests(check) -> None:
         RETRY_WAIT = saved_wait
 
 
+def self_test_serial(check) -> None:
+    """The serial capture's commands, against a PiKVM shell that keeps what
+    it is asked: a start stops the capture before it, sets the line before
+    reading it, empties the log and leaves the reader running apart from
+    the session; a stop kills it; a fetch writes the log's bytes as they
+    are."""
+    class Shell:
+        def __init__(self, answer=b""):
+            self.answer, self.commands = answer, []
+
+        def run(self, command, timeout=30):
+            self.commands.append(command)
+            return self.answer
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        sh = Shell()
+        serial_start(sh)
+        script = sh.commands[0] if sh.commands else ""
+        stops_first = script.find("kill") != -1 and script.find("kill") < script.find("cat ")
+        check("serial start: the capture before stopped first", stops_first, True)
+        check("serial start: the line set to 115200 8N1 raw before it is read",
+              -1 < script.find(f"stty -F {SERIAL_DEVICE} {SERIAL_BAUD} cs8 -cstopb -parenb raw")
+              < script.find(f"cat {SERIAL_DEVICE}"), True)
+        check("serial start: the log emptied", f": > {SERIAL_LOG}" in script, True)
+        check("serial start: the reader alone in the background, every stream away from "
+              "the session, its pid kept",
+              ([line for line in script.splitlines() if line.rstrip().endswith("&")],
+               script.rstrip().endswith(f"echo $! > {SERIAL_PID}")),
+              ([f"nohup cat {SERIAL_DEVICE} >> {SERIAL_LOG} 2>/dev/null </dev/null &"], True))
+        sh = Shell()
+        serial_stop(sh)
+        check("serial stop: the reader killed by its pid",
+              sh.commands and f'kill "$(cat {SERIAL_PID})"' in sh.commands[0], True)
+        with tempfile.TemporaryDirectory(prefix="pikvm-selftest-") as tmp:
+            log = bytes(range(256)) + b"[acpi] line\r\n"
+            out = Path(tmp) / "sub" / "serial.log"
+            n = serial_fetch(Shell(log), out)
+            check("serial fetch: the bytes as they came", (n, out.read_bytes()), (len(log), log))
+
+
 def self_test_screens(check) -> None:
     """wait_still(), changed_from() and click_entry() against a stubbed
     screen, with time passing only as they sleep."""
@@ -1275,6 +1403,13 @@ def main(argv: list[str]) -> int:
                    help="cut the power of a PC that is on (the button held down) rather than "
                         "press its button: for one a press does not stop -- never Windows, "
                         "which a press shuts down properly")
+    p.add_argument("--serial", action="store_true",
+                   help="start a fresh capture of the serial line on the PiKVM just before the "
+                        "PC: `serial fetch` copies it (needs log.pci_serial= on the command line)")
+    p = sub.add_parser("serial")
+    p.add_argument("action", choices=["start", "stop", "fetch"])
+    p.add_argument("out", type=Path, nargs="?", default=Path("build") / "pikvm-serial.log",
+                   help="where `fetch` writes the capture")
     p = sub.add_parser("watch")
     p.add_argument("--seconds", type=float, default=90)
     p.add_argument("--every", type=float, default=6)
@@ -1318,7 +1453,16 @@ def run_command(kvm: PiKvm, args) -> None:
         print("video", source["online"], source["resolution"])
         print("drive", kvm.json("GET", "/api/msd")["drive"])
     elif args.cmd == "boot":
-        boot(kvm, args.image, args.menu_key, args.off_hard)
+        shell = PiKvmShell(kvm.url, kvm.ssh_key) if args.serial else None
+        boot(kvm, args.image, args.menu_key, args.off_hard, serial=shell)
+    elif args.cmd == "serial":
+        shell = PiKvmShell(kvm.url, kvm.ssh_key)
+        if args.action == "start":
+            serial_start(shell)
+        elif args.action == "stop":
+            serial_stop(shell)
+        else:
+            serial_fetch(shell, args.out)
     elif args.cmd == "watch":
         watch(kvm, args.seconds, args.every, args.dir)
     elif args.cmd == "snap":

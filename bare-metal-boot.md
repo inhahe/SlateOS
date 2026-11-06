@@ -300,7 +300,7 @@ no NVRAM boot entry is added, and the image is confined to the stick. So:
 | Image boots in the **diskless shape a stick actually has** | **done** — verified 2026-08-21: `--usb-image --no-rootfs` → `BOOT_OK` in 75 s, tagged as an experiment (see §6) |
 | Guarded writer for a physical stick | **done** — `scripts/write-usb-stick.ps1` |
 | On-screen progress channel | **done** -- the boot steps, and the whole log with `log.screen=1`; used on the test PC 2026-10-27 |
-| The log on a PCIe serial card | **done in QEMU** -- `log.pci_serial=N`; a `pci-serial` behind a PCIe root port carried the whole log, byte for byte the same as COM1 (2026-10-27); awaits the card for the test PC |
+| The log on a PCIe serial card | **done** -- `log.pci_serial=N`; in QEMU a `pci-serial` behind a PCIe root port carried the whole log, byte for byte the same as COM1 (2026-10-27); on the test PC the AX99100's first port carried the whole log of a boot to the PiKVM, from its first line to the S5 power-off (2026-11-06) |
 | Recovery procedure | **documented above**, never exercised |
 | Boot on the operator's PC | **reaches the shell and runs** on the test PC behind a PiKVM (§9): every boot step and self-test, `init` and its services, the shell prompt, the benchmark suite, and 17+ minutes up (2026-10-27, d7261a3c5) |
 | Intel iGPU driver written against the real chip | blocked on the row above (§263) |
@@ -308,7 +308,8 @@ no NVRAM boot entry is added, and the image is confined to the stick. So:
 ## 9. The test PC behind a PiKVM
 
 Since 2026-10-27 the operator's old PC is a test machine that SlateOS boots on
-with nobody at it, through a **PiKVM** (V4 Plus, `192.168.1.188`): a network
+with nobody at it, through a **PiKVM** (V4 Plus, at the address `~/.pikvm` names --
+`192.168.1.189` on 2026-11-06; it has moved before): a network
 device that captures the PC's screen, acts as its keyboard and mouse and as a
 USB drive, and works its power and reset buttons.
 
@@ -318,7 +319,7 @@ USB drive, and works its power and reset buttons.
 | CPU / graphics | i7-8700K, Intel UHD Graphics 630 (the only GPU) |
 | Disks | `nvme0n1` = Samsung 980 PRO 2 TB, **Windows: never written**; `nvme1n1` = Samsung 960 EVO 1 TB, EUI-64 0025385181b1cd22, **may be wiped** |
 | Firmware | UEFI, Secure Boot off; nothing was changed for SlateOS |
-| Serial | none on the board; a PCIe serial card (LinksTek PCIE-SE2, an AX99100) into an RS-232 USB adapter on the PiKVM is on order, for `log.pci_serial=1` |
+| Serial | none on the board; since 2026-11-06 a PCIe serial card (LinksTek PCIE-SE2, an ASIX AX99100, `125b:9100`, at `02:00.0` and `02:00.1`, in a x16 slot) whose first port -- the left one, function 0, I/O `0xe010` -- runs by a null-modem cable to an FTDI FT232R USB adapter on the PiKVM (`/dev/ttyUSB0`): `log.pci_serial=1`, captured by `pikvm.py boot --serial` |
 
 **A boot.** The staged ESP (`scripts/pikvm.py stage`: Limine, the kernel,
 the Linux driver processes as Limine modules -- built first, `--no-linuxdrv`
@@ -332,15 +333,28 @@ into a disk image (`scripts/build-usb-image.py`). `scripts/pikvm.py boot`
 checks that it can be uploaded (it reads, and the PiKVM's storage has room),
 shuts the PC down with a press of its power button
 (`/api/atx/power?action=off`) -- Windows' button is set to shut it down;
-under SlateOS the firmware turns the PC off -- and waits up to 180 s for
+SlateOS takes the button from the firmware and shuts down in order
+(design-decisions 1597) -- and waits up to 180 s for
 the power light to go out, before anything is uploaded; `--off-hard` cuts
 the power instead (`action=off_hard`), for a PC a press does not stop, never
 for Windows. It then loads the image onto the PiKVM's virtual USB drive
 (`/api/msd/write`, then `set_params cdrom=0`, `set_connected`), powers the
 PC on, presses F12 through the PiKVM's keyboard until the boot menu shows,
 and chooses `UEFI: PiKVM Flash Drive`; screenshots (`/api/streamer/snapshot`)
-are the log. The PC's Windows keyboard layout is US Dvorak, which matters only
-when typing into Windows.
+show the screen. The PC's Windows keyboard layout is US Dvorak, which matters
+only when typing into Windows.
+
+**The serial log.** With `--serial`, `boot` starts a fresh capture of the
+PiKVM's serial adapter just before it powers the PC on, so that a kernel
+staged with `log.pci_serial=1` (`stage --add-cmdline "log.pci_serial=1"`)
+has its whole log kept from its first line: `pikvm.py serial fetch <file>`
+copies the capture so far to this PC, and `serial stop` ends it (`serial
+start` begins one by hand). The capture runs on the PiKVM -- `cat` of
+`/dev/ttyUSB0` at 115200 8N1 into `/tmp/slateos-serial.log`, apart from any
+SSH session, so it outlives `boot` and this PC's processes; its `/tmp` is
+RAM, gone when the PiKVM restarts. `pikvm.py` reaches the PiKVM's shell as
+root over SSH with the key `~/.pikvm` names (`ssh_key`, default
+`~/.ssh/pikvm_ed25519`), installed in the PiKVM's `/root/.ssh/authorized_keys`.
 
 **What the first boots found** (each fixed on `lane-a-wip`, none ever seen in
 QEMU):

@@ -1910,8 +1910,25 @@ impl Task {
     }
 }
 
+impl Task {
+    /// This task on the heap, its slot guarded against any free but its own
+    /// (`mm::heap::guard_slot`, given up in [`Drop`]): a stale pointer that
+    /// frees the slot while the task lives is refused and named, rather than
+    /// the scheduler finding the slot already free when it reaps the task
+    /// (known-issues A-TASK-IS-FREED-TWICE-WHEN-THE-ZOMBIE-TEST-REAPS). Before
+    /// `SCHED` is taken: the guard, as `Box::new`, takes the heap lock.
+    pub(crate) fn boxed(self) -> Box<Self> {
+        let task = Box::new(self);
+        crate::mm::heap::guard_slot(core::ptr::from_ref::<Self>(&task).cast());
+        task
+    }
+}
+
 impl Drop for Task {
     fn drop(&mut self) {
+        // The slot is the task's own to free now ([`Task::boxed`]); one that
+        // was never boxed was never guarded, and is passed by.
+        crate::mm::heap::unguard_slot(core::ptr::from_ref::<Self>(self).cast());
         // Warn if a task with an allocated stack is dropped without
         // freeing it first.  This is a resource leak.
         if self.stack_phys != 0 {

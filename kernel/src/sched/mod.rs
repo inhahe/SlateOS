@@ -2083,7 +2083,7 @@ pub fn init() {
     // the kernel would then have to avoid forever.  Hoisting the allocation
     // means the order simply does not exist.  (Q24 allocation-under-spinlock
     // sweep.)
-    let idle = Box::new(Task::new_idle());
+    let idle = Task::new_idle().boxed();
 
     let mut state = SCHED.lock();
     state.tasks.insert(0, idle);
@@ -2151,7 +2151,7 @@ pub fn init() {
 pub fn register_ap_idle(cpu_index: usize) -> TaskId {
     // Boxed before SCHED is taken: `Box::new` takes the heap lock, and doing
     // that under SCHED would create a SCHED -> HEAP lock order.  See `init`.
-    let idle = Box::new(Task::new_ap_idle(cpu_index));
+    let idle = Task::new_ap_idle(cpu_index).boxed();
     let id = idle.id;
 
     let mut state = SCHED.lock();
@@ -2575,7 +2575,7 @@ fn spawn_inner(
         // — on the `NotSupported` path the box is dropped exactly where the
         // bare `new_task` used to be, running the same `Task` destructor and
         // freeing the same kernel stack.
-        let mut new_task = Box::new(new_task);
+        let mut new_task = new_task.boxed();
 
         let mut state = SCHED.lock();
         if !state.initialized {

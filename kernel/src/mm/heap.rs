@@ -77,6 +77,47 @@ static POISON_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
 /// Count of detected double-free attempts.
 static DOUBLE_FREE_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
 
+/// Heap slots whose object something else must never free ([`guard_slot`]):
+/// each a live owner's, by address. A leaf of the heap lock's: taken only
+/// by `try_lock` under it ([`is_guarded`]), so it never waits there.
+static GUARDED: Mutex<alloc::collections::BTreeSet<usize>> =
+    Mutex::new(alloc::collections::BTreeSet::new());
+
+/// Whether any slot was ever guarded: a free asks [`GUARDED`] only then.
+static GUARDING: AtomicBool = AtomicBool::new(false);
+
+/// The slot at `ptr` guarded: from here until [`unguard_slot`], a free that
+/// reaches it is a free through a stale pointer -- of an object that once
+/// lay there, freed long ago -- and the allocator refuses it, says so with
+/// the freeing code's frames, and counts it with the double frees. Caught
+/// where it happens, rather than when the slot's rightful owner frees it
+/// later and finds it already free, the memory between them corrupted. For
+/// an object freed only one way, its owner's, by [`unguard_slot`] first: a
+/// scheduler task's own record (`sched::task::Task::boxed`).
+pub fn guard_slot(ptr: *const u8) {
+    GUARDED.lock().insert(ptr as usize);
+    GUARDING.store(true, Ordering::Release);
+}
+
+/// The slot at `ptr` no longer guarded ([`guard_slot`]), for its owner's
+/// own free, which follows.
+pub fn unguard_slot(ptr: *const u8) {
+    if GUARDING.load(Ordering::Acquire) {
+        GUARDED.lock().remove(&(ptr as usize));
+    }
+}
+
+/// Whether the slot at `ptr` is guarded ([`guard_slot`]). Under the heap
+/// lock: the set is only tried, and a set busy elsewhere -- a guard or an
+/// unguard under way, whose own allocation may be what is being freed --
+/// answers no.
+fn is_guarded(ptr: *const u8) -> bool {
+    GUARDING.load(Ordering::Acquire)
+        && GUARDED
+            .try_lock()
+            .is_some_and(|set| set.contains(&(ptr as usize)))
+}
+
 /// Count of detected buffer overflows (red zone corruption).
 static REDZONE_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
 
@@ -1046,6 +1087,20 @@ impl HeapInner {
     // the class size (>= 8 bytes).
     #[allow(clippy::indexing_slicing, clippy::cast_ptr_alignment)]
     fn slab_dealloc(&mut self, ptr: *mut u8, class_idx: usize) {
+        // A free reaching a live owner's slot: refused, as a double free is,
+        // the owner's object left whole ([`guard_slot`]).
+        if is_guarded(ptr) {
+            DOUBLE_FREE_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+            serial_println!(
+                "[heap] FREE OF A GUARDED SLOT refused: slot={:#x} holds a live owner's object (a scheduler task's record); this free came through a stale pointer",
+                ptr as usize
+            );
+            let bt = crate::backtrace::capture();
+            for (i, f) in bt.frames.iter().take(bt.count).take(16).enumerate() {
+                serial_println!("[heap]   stale free frame {i}: {:#x}", f.return_addr);
+            }
+            return;
+        }
         // Slab poisoning: fill freed memory with FREE_POISON pattern.
         // If a double-free is detected, do NOT re-add the slot — it's
         // already on the free list and re-adding would create a cycle.
@@ -2829,6 +2884,39 @@ pub fn poison_self_test() -> crate::error::KernelResult<()> {
         "poison test: live data holding the magic constant reported as a double-free"
     );
     serial_println!("[heap]   Magic constant in live data: OK (not a double-free)");
+
+    // --- Test 6: a guarded slot refuses every free but its owner's ---
+    //
+    // A 1024-byte slot, a scheduler task's class, guarded as a task's is
+    // (`guard_slot`): a free reaching it -- a stale pointer's -- is refused
+    // and counted, the slot left as it was, unpoisoned; once its owner
+    // unguards it, the owner's own free is taken, and counted as nothing.
+    let layout_task = Layout::new::<[u8; 600]>();
+    // SAFETY: layout_task is valid, allocator initialized.
+    let p8 = unsafe { alloc::alloc::alloc(layout_task) };
+    assert!(
+        !p8.is_null(),
+        "poison test: alloc for the guarded-slot test failed"
+    );
+    guard_slot(p8);
+    let guard_pre = DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed);
+    double_free_slot(p8, layout_task);
+    let guard_post = DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed);
+    // SAFETY: p8 is still allocated -- the free above was refused -- and
+    // at least 16 bytes.
+    let poisoned = unsafe { read_free_signature(p8) } == poison_magic_for(p8 as usize);
+    unguard_slot(p8);
+    // SAFETY: p8 was allocated with layout_task and is freed once, now.
+    unsafe {
+        alloc::alloc::dealloc(p8, layout_task);
+    }
+    let owner_post = DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed);
+    assert_eq!(
+        (guard_post, poisoned, owner_post),
+        (guard_pre.wrapping_add(1), false, guard_pre.wrapping_add(1)),
+        "poison test: a free of a guarded slot was not refused, or the slot was freed all the same, or its owner's free was refused"
+    );
+    serial_println!("[heap]   Guarded slot: OK (a stale free refused, the owner's taken)");
 
     // SAFETY: restoring the interrupt state disabled at the start of
     // this test.  All allocations have been freed.

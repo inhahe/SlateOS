@@ -86,6 +86,10 @@ static GUARDED: Mutex<alloc::collections::BTreeSet<usize>> =
 /// Whether any slot was ever guarded: a free asks [`GUARDED`] only then.
 static GUARDING: AtomicBool = AtomicBool::new(false);
 
+/// The slab class of the guarded slots ([`guard_slot`]), `usize::MAX` for
+/// none: only a free of that class asks [`GUARDED`], so no other pays for it.
+static GUARD_CLASS: AtomicUsize = AtomicUsize::new(usize::MAX);
+
 /// The slot at `ptr` guarded: from here until [`unguard_slot`], a free that
 /// reaches it is a free through a stale pointer -- of an object that once
 /// lay there, freed long ago -- and the allocator refuses it, says so with
@@ -93,8 +97,19 @@ static GUARDING: AtomicBool = AtomicBool::new(false);
 /// where it happens, rather than when the slot's rightful owner frees it
 /// later and finds it already free, the memory between them corrupted. For
 /// an object freed only one way, its owner's, by [`unguard_slot`] first: a
-/// scheduler task's own record (`sched::task::Task::boxed`).
-pub fn guard_slot(ptr: *const u8) {
+/// scheduler task's own record (`sched::task::Task::boxed`). `layout` is the
+/// object's, as allocated: its slab class is the one guarded, and every
+/// guarded slot is of one class; an object no slab holds is not guarded.
+pub fn guard_slot(ptr: *const u8, layout: Layout) {
+    let Some(class) = HeapInner::size_class_index(&layout) else {
+        return;
+    };
+    let was = GUARD_CLASS.swap(class, Ordering::AcqRel);
+    if was != usize::MAX && was != class {
+        serial_println!(
+            "[heap] WARNING: slots of class {was} and {class} guarded: only class {class}'s frees are checked from here on"
+        );
+    }
     GUARDED.lock().insert(ptr as usize);
     GUARDING.store(true, Ordering::Release);
 }
@@ -107,15 +122,31 @@ pub fn unguard_slot(ptr: *const u8) {
     }
 }
 
-/// Whether the slot at `ptr` is guarded ([`guard_slot`]). Under the heap
-/// lock: the set is only tried, and a set busy elsewhere -- a guard or an
-/// unguard under way, whose own allocation may be what is being freed --
-/// answers no.
-fn is_guarded(ptr: *const u8) -> bool {
+/// Whether the slot at `ptr`, of slab class `class`, is guarded
+/// ([`guard_slot`]). At a free's start, before its paths part -- the per-CPU
+/// cache's and the global free list's -- and before anything is done to the
+/// slot. The set is only tried: one busy elsewhere -- a guard or an unguard
+/// under way, whose own allocation may be what is being freed -- answers no.
+fn is_guarded(ptr: *const u8, class: Option<usize>) -> bool {
     GUARDING.load(Ordering::Acquire)
+        && class == Some(GUARD_CLASS.load(Ordering::Acquire))
         && GUARDED
             .try_lock()
             .is_some_and(|set| set.contains(&(ptr as usize)))
+}
+
+/// A free of a guarded slot ([`guard_slot`]), refused: counted with the
+/// double frees and said, with the freeing code's frames.
+fn refuse_guarded_free(ptr: *const u8) {
+    DOUBLE_FREE_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+    serial_println!(
+        "[heap] FREE OF A GUARDED SLOT refused: slot={:#x} holds a live owner's object (a scheduler task's record); this free came through a stale pointer",
+        ptr as usize
+    );
+    let bt = crate::backtrace::capture();
+    for (i, f) in bt.frames.iter().take(bt.count).take(16).enumerate() {
+        serial_println!("[heap]   stale free frame {i}: {:#x}", f.return_addr);
+    }
 }
 
 /// Count of detected buffer overflows (red zone corruption).
@@ -1087,20 +1118,6 @@ impl HeapInner {
     // the class size (>= 8 bytes).
     #[allow(clippy::indexing_slicing, clippy::cast_ptr_alignment)]
     fn slab_dealloc(&mut self, ptr: *mut u8, class_idx: usize) {
-        // A free reaching a live owner's slot: refused, as a double free is,
-        // the owner's object left whole ([`guard_slot`]).
-        if is_guarded(ptr) {
-            DOUBLE_FREE_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
-            serial_println!(
-                "[heap] FREE OF A GUARDED SLOT refused: slot={:#x} holds a live owner's object (a scheduler task's record); this free came through a stale pointer",
-                ptr as usize
-            );
-            let bt = crate::backtrace::capture();
-            for (i, f) in bt.frames.iter().take(bt.count).take(16).enumerate() {
-                serial_println!("[heap]   stale free frame {i}: {:#x}", f.return_addr);
-            }
-            return;
-        }
         // Slab poisoning: fill freed memory with FREE_POISON pattern.
         // If a double-free is detected, do NOT re-add the slot — it's
         // already on the free list and re-adding would create a cycle.
@@ -1664,6 +1681,14 @@ unsafe impl GlobalAlloc for KernelHeap {
         // global paths.  Previously this was computed twice when falling
         // through from the per-CPU fast path to the global slow path.
         let class_idx = HeapInner::size_class_index(&layout);
+
+        // A free reaching a live owner's slot: refused, as a double free is,
+        // the owner's object left whole -- before the red zone is read, which
+        // is the live object's own bytes, and before the paths part.
+        if is_guarded(ptr, class_idx) {
+            refuse_guarded_free(ptr);
+            return;
+        }
 
         // Red zone check: if poisoning is enabled, verify that bytes
         // between the user's allocation size and the class size still
@@ -2898,7 +2923,7 @@ pub fn poison_self_test() -> crate::error::KernelResult<()> {
         !p8.is_null(),
         "poison test: alloc for the guarded-slot test failed"
     );
-    guard_slot(p8);
+    guard_slot(p8, layout_task);
     let guard_pre = DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed);
     double_free_slot(p8, layout_task);
     let guard_post = DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed);

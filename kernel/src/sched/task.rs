@@ -1919,7 +1919,10 @@ impl Task {
     /// `SCHED` is taken: the guard, as `Box::new`, takes the heap lock.
     pub(crate) fn boxed(self) -> Box<Self> {
         let task = Box::new(self);
-        crate::mm::heap::guard_slot(core::ptr::from_ref::<Self>(&task).cast());
+        crate::mm::heap::guard_slot(
+            core::ptr::from_ref::<Self>(&task).cast(),
+            core::alloc::Layout::new::<Self>(),
+        );
         task
     }
 }

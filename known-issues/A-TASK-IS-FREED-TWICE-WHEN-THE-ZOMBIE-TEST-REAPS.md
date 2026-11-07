@@ -1,8 +1,11 @@
 ## A-TASK-IS-FREED-TWICE-WHEN-THE-ZOMBIE-TEST-REAPS (lane A, 2026-11-01) — OPEN
 
-**Status:** OPEN -- seen in both full boot tests of one kernel binary, at the
-same slot; gone when that binary was instrumented to find it; it keeps
-lane A's 2c252e9a4 off main
+**Status:** OPEN -- seen in three full boot tests of two kernel binaries
+(2c252e9a4 twice, a05eedbb4), never since; since b4f021af6 a live task's
+slot refuses every free but its own and names the code that tried
+(`mm::heap::guard_slot`, below), so the next time it strikes the report is
+the stale free itself, and the task is left whole. It keeps lane A's
+batches from 2c252e9a4 off main until it is understood.
 
 **In short:** in two boot tests of one kernel binary the heap's double-free
 detector fired at the same moment -- as the spawn self-test's zombie
@@ -52,6 +55,17 @@ layout. The lead is 522cf381e..2c252e9a4, the third review follow-up of
 the WiFi namespace work (mntns `Held`/`Sealed`, `enter_process`, `leave`,
 `create`'s id order, the vfs detach self-test's hold), the only change
 between the last build that passed and the first that failed.
+
+**The guard, 2026-11-06.** `Task::boxed` guards every task's record as it
+is boxed (`mm::heap::guard_slot`), and `Task`'s `Drop` unguards it: a free
+of the slot meanwhile -- the stale free this issue is about -- is refused at
+the start of `KernelHeap::dealloc`, before the per-CPU and global paths
+part, counted with the double frees (so `syshealth` fails the boot), and
+reported as "FREE OF A GUARDED SLOT refused" with the freeing code's
+frames. The poison self-test's Test 6 checks it; its first version, on the
+global path alone, failed that test (`(1, true, 2)`), the per-CPU cache
+taking the free. The boot test of b4f021af6 passed with no task slot freed
+early and no task double free -- this build did not strike it either.
 
 **What is known of the cause.** It follows the binary's layout, not one
 change: the boot tests of 522cf381e passed this check, both of 2c252e9a4
